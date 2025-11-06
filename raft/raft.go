@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -55,8 +56,8 @@ type Meta struct {
 	sync.RWMutex
 }
 
-// var electionTO = time.Duration(601+rand.Intn(999)) * time.Millisecond
-// var heartbeatTO = time.Duration(600+rand.Intn(300)) * time.Millisecond
+//var electionTO = time.Duration(10+rand.Intn(10)) * time.Millisecond
+//var heartbeatTO = time.Duration(1+rand.Intn(10)) * time.Millisecond
 
 var electionTO = time.Duration(1100+rand.Intn(1000)+rand.Intn(999)) * time.Millisecond
 var heartbeatTO = time.Duration(500+rand.Intn(500)) * time.Millisecond
@@ -167,6 +168,7 @@ type node struct {
 	leaderID        int64
 	matchIndex      map[int64]int64
 	nextIndex       map[int64]int64
+	logger          *log.Logger
 	sync.RWMutex
 }
 
@@ -175,8 +177,13 @@ func generateNodeID() int64 {
 }
 
 func newNode() *node {
+	l := log.NewWithOptions(os.Stdout, log.Options{
+		Level: log.DebugLevel,
+	})
+
 	return &node{
-		ID: generateNodeID(),
+		ID:     generateNodeID(),
+		logger: l,
 		meta: &Meta{
 			nt:         Follower,
 			nextIndex:  make(map[int]int64),
@@ -249,7 +256,8 @@ func (n *node) AppendEntriesRPC(ctx context.Context, in *proto.AppendEntries) (*
 	// make sure everything is consistent upto PrevLogIdx, PrevLogTerm
 	if in.PrevLogIdx > 0 {
 		if n.logManager.GetLog(int(in.PrevLogIdx)).GetTerm() != in.PrevLogTerm {
-			log.Error("[X] inconsistent state", n.logManager.GetLog(int(in.PrevLogIdx)).GetTerm(), in.PrevLogTerm)
+			weird := n.logManager.GetLog(int(in.PrevLogIdx))
+			log.Error("[X] inconsistent state", "in.PrevLogIdx", in.PrevLogIdx, weird, in.PrevLogTerm)
 			return &proto.AppendEntriesResponse{
 				Success: false,
 			}, nil
@@ -259,14 +267,19 @@ func (n *node) AppendEntriesRPC(ctx context.Context, in *proto.AppendEntries) (*
 	// now that we know everything is consistent, process the new entries
 	for _, entry := range in.Entries {
 		existingEntry := n.logManager.GetLog(int(entry.Id))
-		if existingEntry != nil && existingEntry.Id == entry.Id && existingEntry.Term != entry.Term {
-			// if an entry conflicts at this index, i.e. same ID but different term
-			// that means all subsequent entries are going to be incorrect/ conflicting
-			// this is because, log matching property ensures that if one entry is correct
-			// all preceding must be right.
-			//
-			// So we delete the entry at this index, and overwrite with the new incoming ones
-			n.logManager.TruncateAfter(int(entry.Id - 1))
+		if existingEntry != nil {
+			if existingEntry.Id == entry.Id && existingEntry.Term != entry.Term {
+				// if an entry conflicts at this index, i.e. same ID but different term
+				// that means all subsequent entries are going to be incorrect/ conflicting
+				// this is because, log matching property ensures that if one entry is correct
+				// all preceding must be right.
+				//
+				// So we delete the entry at this index, and overwrite with the new incoming ones
+				n.logManager.TruncateAfter(int(entry.Id - 1))
+			} else {
+				n.logger.Debug("skipping entry", "entryid", entry.Id, "existing entry", existingEntry)
+				continue
+			}
 		}
 
 		log.Info("[APPEND] new entry added", entry)
@@ -298,7 +311,6 @@ func (n *node) AppendEntriesRPC(ctx context.Context, in *proto.AppendEntries) (*
 }
 
 // handles incoming election requests
-// TODO: for a given term, vote only 1 candidate
 func (n *node) RequestVoteRPC(ctx context.Context, in *proto.RequestVote) (*proto.RequestVoteResponse, error) {
 	if n.state.currentTerm > in.Term {
 		return &proto.RequestVoteResponse{
@@ -321,6 +333,10 @@ func (n *node) RequestVoteRPC(ctx context.Context, in *proto.RequestVote) (*prot
 		n.state.Unlock()
 
 		if in.LastLogTerm <= n.logManager.GetLastLogTerm() {
+			n.state.Lock()
+			n.state.currentTerm = in.Term
+			n.state.Unlock()
+
 			return &proto.RequestVoteResponse{
 				VoteGranted: true,
 				Term:        n.state.currentTerm,
@@ -349,6 +365,8 @@ func (n *node) replicate(ctx context.Context, key, val []byte) error {
 		},
 	}
 
+	n.logger.Debug("newlog", "log", newlog)
+
 	n.logManager.Append(newlog)
 
 	peers := []int64{}
@@ -369,16 +387,16 @@ func (n *node) replicate(ctx context.Context, key, val []byte) error {
 
 	for peer := range n.cluster {
 		idx := n.matchIndex[peer]
-		if idx >= newlog.Id {
+		if idx == newlog.Id {
 			replStatus += 1
 		}
 	}
 
-	if replStatus >= len(n.cluster)/2 {
+	if replStatus >= len(n.cluster)/2+1 {
 		// log has been successfully applied to the state machine,
 		// now commit this log.
 		n.meta.lastCommitIndex = newlog.Id
-		log.Info("Successfully Replicated", "CommitIndex", n.meta.lastCommitIndex)
+		log.Info("Successfully Replicated", "nextIndexes", n.nextIndex, "matchIndexes", n.matchIndex)
 		return nil
 	}
 
@@ -399,15 +417,15 @@ func (n *node) sendAppendEntries(peers []int64) ([]int64, error) {
 			continue
 		}
 
-		fmt.Println("repl: sending to:", peer)
-
-		prevLogIndex := n.nextIndex[peer]
+		prevLogIndex := n.nextIndex[peer] - 1
 		var prevLogTerm int64
 
 		lastLog := n.logManager.GetLog(int(prevLogIndex))
 		if lastLog != nil {
 			prevLogTerm = lastLog.Term
 		}
+
+		n.logger.Debug("AppendRPC Before", "prevLogIndex", prevLogIndex, "prevLogTerm", prevLogTerm)
 
 		resp, err := n.cluster[peer].AppendEntriesRPC(context.TODO(), &proto.AppendEntries{
 			Term:        n.state.currentTerm,
@@ -420,34 +438,37 @@ func (n *node) sendAppendEntries(peers []int64) ([]int64, error) {
 		// TODO: decrement nextIndex when log consistency check fails
 		// i.e. line 242
 		if err != nil {
-			fmt.Printf("append entries rpc: repl: %v", err)
-			continue
-		}
-
-		// this response means the node is telling us that the log
-		// consistency check has failed, so we decrement our nextIndex
-		// here
-		if !resp.Success && resp.CurrentTerm == 0 {
-			n.nextIndex[peer] -= 1
-			fmt.Printf("decrementing nextIndex to %d for peer %d", n.nextIndex[peer], peer)
 			failedPeers = append(failedPeers, peer)
-		}
-
-		if resp.CurrentTerm > n.state.currentTerm {
-			// transition back to the follower state as we have encountered a term higher
-			// than ours indicating a potential leader
-			n.state.currentTerm = resp.CurrentTerm
-			n.meta.Lock()
-			if n.meta.nt == Leader {
-				n.meta.nt = Follower
-				log.Warn("Transitioned back to follower")
+			n.logger.Debug("Peer added to failed", "peer", peer)
+		} else {
+			// this response means the node is telling us that the log
+			// consistency check has failed, so we decrement our nextIndex
+			// here
+			if !resp.Success && resp.CurrentTerm == 0 {
+				n.nextIndex[peer] -= 1
+				n.logger.Debug("LogMatchFail", "decremented next index for", peer)
+				failedPeers = append(failedPeers, peer)
 			}
-			n.meta.Unlock()
-		}
 
-		if resp.Success {
-			n.matchIndex[peer] += 1
-			n.nextIndex[peer] += 2
+			if resp.CurrentTerm > n.state.currentTerm {
+				// transition back to the follower state as we have encountered a term higher
+				// than ours indicating a potential leader
+				n.state.currentTerm = resp.CurrentTerm
+				n.meta.Lock()
+				if n.meta.nt == Leader {
+					n.meta.nt = Follower
+					log.Warn("Transitioned back to follower")
+				}
+				n.meta.Unlock()
+			}
+
+			if resp.Success {
+				n.matchIndex[peer] += 1
+				n.nextIndex[peer] += 2
+				n.logger.Info("Successfull rpc, advancing match and next indexes")
+			}
+
+			n.logger.Debug("debug indexes", "matchIndex", n.matchIndex, "nextIndex", n.nextIndex)
 		}
 	}
 
@@ -470,7 +491,7 @@ func (n *node) startElection() {
 				continue
 			}
 
-			fmt.Println("leader timed out, standing for new elections")
+			fmt.Println("leader timed out, standing for new elections", len(n.cluster))
 			electionTimeOut.Reset(electionTO)
 
 			// increment currentTerm
