@@ -2,10 +2,11 @@ package harmonydb
 
 import (
 	"errors"
+	"fmt"
 )
 
 type BTree struct {
-	store
+	*fileStore
 	// the very first time, a `root` node is always a leaf node
 	// the recursive split logic, takes care of eventually making the `root` node
 	// become an internal node
@@ -13,29 +14,35 @@ type BTree struct {
 }
 
 func NewBTree() *BTree {
-	b := &BTree{
-		store: store{
-			pages: make([]*Node, 0),
-		},
-		root: nil,
+	f, err := newFileStore("/tmp/data")
+	if err != nil {
+		panic(fmt.Errorf("file store: %w", err))
 	}
 
+	b := &BTree{
+		fileStore: f,
+		root:      nil,
+	}
+
+	// root page always starts out as leaf
 	b.setRootPage(&Node{isLeaf: true})
 
 	return b
 }
 
+// in-memory store
 type store struct {
 	pages []*Node
 }
 
 func (b *BTree) add(pg *Node) {
-	pg.setFileOffsetForNode(uint64(len(b.pages)))
-	b.pages = append(b.pages, pg)
+	pg.setFileOffsetForNode(b.nextFreeOffset)
+	b.cache[int64(pg.fileOffset)] = pg
+	b.nextFreeOffset += pageSize
 }
 
 func (b *BTree) fetch(fo uint64) *Node {
-	return b.pages[fo]
+	return b.cache[int64(fo)]
 }
 
 func (b *BTree) getRootPage() *Node {
@@ -88,6 +95,8 @@ func (b *BTree) insertLeaf(parent, curr *Node, key, value []byte) error {
 	ofs := curr.findInsPointForKey(key)
 	curr.insertLeafCell(ofs, key, value)
 
+	curr.markDirty()
+
 	if !curr.isFull() {
 		return nil
 	}
@@ -108,13 +117,14 @@ func (b *BTree) insertLeaf(parent, curr *Node, key, value []byte) error {
 		parentPg.appendInternalCell(newpg.fileOffset, sep)
 
 		b.setRootPage(b.root)
-		return nil
+	} else {
+		// now we add the seperator key to the current internal node
+		// to make it reachable via our BTree
+		of := parent.findInsPointForKey(sep)
+		parent.insertInternalCell(of, newpg.fileOffset, sep)
 	}
 
-	// now we add the seperator key to the current internal node
-	// to make it reachable via our BTree
-	of := parent.findInsPointForKey(sep)
-	parent.insertInternalCell(of, newpg.fileOffset, sep)
+	curr.markDirty()
 
 	return nil
 }
@@ -128,7 +138,7 @@ func (b *BTree) insertInternal(parent, curr *Node, key, value []byte) error {
 	// 5. if yes, split, add sep key to node
 
 	offset := curr.findInsPointForKey(key)
-	childpg := b.pages[uint64(offset)]
+	childpg := b.cache[int64(offset)]
 
 	if childpg.isLeaf {
 		b.insertLeaf(curr, childpg, key, value)

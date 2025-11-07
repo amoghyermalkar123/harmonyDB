@@ -13,22 +13,21 @@ These invariants MUST be tested and working before adding persistence layer:
 [X] leader should only commit entries from current term once replicated on majority
 [X] logs should be consistent across all nodes for committed entries
 [X] leader should never overwrite or delete entries in its log
-[] follower should truncate conflicting entries when receiving AppendEntries
-[] leader should include prevLogIndex and prevLogTerm to ensure log consistency
-[] nodes should reject AppendEntries if they don't have matching prevLogIndex/prevLogTerm
-[] committed entries should never be lost once applied to state machine
-
-[Critical Safety Properties]:
-[] state machine safety - if server applies log entry at index, no other server applies different entry at same index
-[] leader append-only - leader never overwrites or deletes entries in its log
-[] monotonic term progression - currentTerm only increases, never decreases
-[] election safety - at most one leader per term
+[X] leader should include prevLogIndex and prevLogTerm to ensure log consistency
+[X] nodes should reject AppendEntries if they don't have matching prevLogIndex/prevLogTerm
 
 [bugs]:
 [] when a leader transitions back to a follower and another node becomes the leader, it fails to replicate on majority of nodes
 
 ## NON-TRIAGED (NOT BLOCKING PERSISTENCE LAYER)
 These can be addressed after persistence layer is working:
+
+[] committed entries should never be lost once applied to state machine
+[] follower should truncate conflicting entries when receiving AppendEntries
+[] state machine safety - if server applies log entry at index, no other server applies different entry at same index
+[] leader append-only - leader never overwrites or deletes entries in its log
+[] monotonic term progression - currentTerm only increases, never decreases
+[] election safety - at most one leader per term
 
 [Leader Election - Optimizations]:
 [] nodes should vote for at most one candidate in a given term

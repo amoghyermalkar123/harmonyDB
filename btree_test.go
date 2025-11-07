@@ -227,7 +227,7 @@ func TestBTreeStoreOperations(t *testing.T) {
 			require.NoError(t, err)
 		}
 
-		assert.Greater(t, len(bt.pages), 0)
+		assert.Greater(t, len(bt.cache), 0)
 	})
 
 	t.Run("file offset uniqueness", func(t *testing.T) {
@@ -239,7 +239,7 @@ func TestBTreeStoreOperations(t *testing.T) {
 		}
 
 		offsets := make(map[uint64]bool)
-		for _, page := range bt.pages {
+		for _, page := range bt.cache {
 			assert.False(t, offsets[page.fileOffset], "duplicate file offset found")
 			offsets[page.fileOffset] = true
 		}

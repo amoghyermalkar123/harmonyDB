@@ -15,8 +15,10 @@ const (
 	InternalNode
 )
 
-const maxLeafNodeCells = 9
-const maxInternalNodeCells = 290
+const (
+	maxLeafNodeCells     = 9
+	maxInternalNodeCells = 290
+)
 
 type internalCell struct {
 	key        []byte
@@ -41,6 +43,7 @@ type leafCell struct {
 // | klen | vlen | key | val |
 // | 2B | 2B | ... | ... |
 type Node struct {
+	isDirty    bool
 	isLeaf     bool
 	fileOffset uint64
 
@@ -187,6 +190,22 @@ func (n *Node) findLeafCell(key []byte) *leafCell {
 	}
 
 	return nil
+}
+
+func (n *Node) encode() ([]byte, error) {
+	if n.isLeaf {
+		return n.encodeLeaf()
+	}
+
+	return n.encodeInternal()
+}
+
+func (n *Node) markDirty() {
+	n.isDirty = true
+}
+
+func (n *Node) markClean() {
+	n.isDirty = false
 }
 
 func (n *Node) encodeLeaf() ([]byte, error) {
