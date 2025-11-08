@@ -54,6 +54,10 @@ func (db *Db) Put(key, val []byte) error {
 	return nil
 }
 
+func (db *Db) Get(key []byte) ([]byte, error) {
+	return db.btree.Get(key)
+}
+
 func isPortAvailable(port int) bool {
 	listener, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", port))
 	if err != nil {

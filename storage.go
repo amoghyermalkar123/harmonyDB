@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
+
+	"github.com/charmbracelet/log"
 )
 
 type fileStore struct {
@@ -22,10 +25,25 @@ func newFileStore(path string) (*fileStore, error) {
 		return nil, err
 	}
 
-	return &fileStore{
+	f := &fileStore{
 		file:  file,
 		cache: make(map[int64]*Node),
-	}, nil
+	}
+
+	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		for {
+			select {
+			case <-ticker.C:
+				log.Warn("[DISK] Flushing Pages")
+				if err := f.flushPages(); err != nil {
+					panic(fmt.Errorf("flushPages(): %w", err))
+				}
+			}
+		}
+	}()
+
+	return f, nil
 }
 
 func (f *fileStore) setRoot(node *Node) {
