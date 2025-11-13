@@ -2,6 +2,22 @@
 
 ## Learning-Driven Development Plan
 
+### Phase 0: QoL
+- [x] Add logging for debugging (✅ Implemented with zap)
+- [ ] **Performance Monitoring & Instrumentation**
+  - Add Prometheus client library to dependencies
+  - Create metrics package with key performance indicators
+  - Add /metrics endpoint to HTTP server
+  - Instrument Raft operations with metrics (elections, log replication, state transitions)
+  - Instrument database operations with metrics (Put/Get latency, throughput)
+  - Instrument API operations with metrics (request duration, status codes)
+  - Create Docker Compose for Prometheus + Grafana
+  - Create Grafana dashboards (cluster health, performance, system resources)
+  - Add pprof endpoints for profiling (CPU, memory, goroutines)
+  - Implement load testing framework (k6 scripts, custom Go clients)
+  - Add distributed tracing with OpenTelemetry/Jaeger
+
+
 ### Phase 1: Core Distributed Features (High Impact)
 - [ ] **WAL Implementation** - Learn durability guarantees
   - Write-ahead logging for crash recovery

@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 	"harmonydb/raft"
-	"net"
-	"os"
+
+	"go.uber.org/zap"
 )
 
 type Db struct {
@@ -13,22 +13,7 @@ type Db struct {
 	consensus *raft.Raft
 }
 
-func Open() (*Db, error) {
-	// Try to find an available port
-	nodePort := -1
-	for i := 0; i < 3; i++ {
-		testPort := 8080 + i
-		if isPortAvailable(testPort) {
-			nodePort = testPort
-			break
-		}
-	}
-
-	if nodePort == -1 {
-		fmt.Println("No available ports found in range 8080-8082")
-		os.Exit(1)
-	}
-
+func Open(nodePort int) (*Db, error) {
 	return &Db{
 		btree:     NewBTree(),
 		consensus: raft.NewRaftServerWithConsul(nodePort),
@@ -36,14 +21,20 @@ func Open() (*Db, error) {
 }
 
 func (db *Db) Put(key, val []byte) error {
+	GetLogger().Debug("Put", zap.String("component", "db"))
+
 	if err := db.consensus.Put(context.TODO(), key, val); err != nil {
+		// TODO: leader req redirection
 		return fmt.Errorf("consensus: %w", err)
 	}
 
 	lastApplied, lastCommitted := db.consensus.GetLastAppliedLastCommitted()
 
+	GetLogger().Debug("Consensus Success", zap.String("component", "db"), zap.Int64("lastApplied", lastApplied), zap.Int64("lastCommitted", lastCommitted))
+
 	// apply all remaining entries since we last applied to the database
 	for i := lastApplied; i <= lastCommitted; i++ {
+		GetLogger().Debug("Apply Log", zap.String("component", "db"), zap.Int64("lastApplied", lastApplied), zap.Int64("lastCommitted", lastCommitted))
 		if err := db.btree.Put(key, val); err != nil {
 			return fmt.Errorf("Put : %w", err)
 		}
@@ -56,13 +47,4 @@ func (db *Db) Put(key, val []byte) error {
 
 func (db *Db) Get(key []byte) ([]byte, error) {
 	return db.btree.Get(key)
-}
-
-func isPortAvailable(port int) bool {
-	listener, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", port))
-	if err != nil {
-		return false
-	}
-	listener.Close()
-	return true
 }

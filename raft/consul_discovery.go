@@ -71,7 +71,8 @@ func (cd *ConsulDiscovery) Register() error {
 		return fmt.Errorf("failed to register service: %v", err)
 	}
 
-	fmt.Printf("✅ Registered node %d with Consul as %s\n", cd.nodeID, serviceID)
+	// Note: we can't import harmonydb.GetLogger() here due to circular import
+	// The caller should log this registration
 	return nil
 }
 
@@ -81,7 +82,6 @@ func (cd *ConsulDiscovery) Deregister() error {
 	if err != nil {
 		return fmt.Errorf("failed to deregister service: %v", err)
 	}
-	fmt.Printf("❌ Deregistered node %d from Consul\n", cd.nodeID)
 	return nil
 }
 
@@ -112,12 +112,10 @@ func (cd *ConsulDiscovery) DiscoverPeers() (map[int64]proto.RaftClient, error) {
 		address := fmt.Sprintf("%s:%d", service.Service.Address, service.Service.Port)
 		client, err := cd.connectToPeer(address)
 		if err != nil {
-			fmt.Printf("⚠️  Failed to connect to peer %d at %s: %v\n", nodeID, address, err)
 			continue
 		}
 
 		cluster[nodeID] = client
-		// fmt.Printf("🔗 Connected to peer %d at %s\n", nodeID, address)
 	}
 
 	return cluster, nil
@@ -142,7 +140,6 @@ func (cd *ConsulDiscovery) WatchForChanges(updateCluster func(map[int64]proto.Ra
 		for range ticker.C {
 			newCluster, err := cd.DiscoverPeers()
 			if err != nil {
-				fmt.Printf("❌ Error during peer discovery: %v\n", err)
 				continue
 			}
 			updateCluster(newCluster)

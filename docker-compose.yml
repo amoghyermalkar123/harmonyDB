@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  node1:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - NODE_ID=1
+      - CLUSTER_NODES=node1:8080,node2:8081,node3:8082
+    networks:
+      - harmonydb-cluster
+
+  node2:
+    build: .
+    ports:
+      - "8081:8081"
+    environment:
+      - PORT=8081
+      - NODE_ID=2
+      - CLUSTER_NODES=node1:8080,node2:8081,node3:8082
+    networks:
+      - harmonydb-cluster
+
+  node3:
+    build: .
+    ports:
+      - "8082:8082"
+    environment:
+      - PORT=8082
+      - NODE_ID=3
+      - CLUSTER_NODES=node1:8080,node2:8081,node3:8082
+    networks:
+      - harmonydb-cluster
+
+  jepsen:
+    build:
+      context: ./jepsen
+      dockerfile: Dockerfile
+    depends_on:
+      - node1
+      - node2
+      - node3
+    environment:
+      - HARMONYDB_NODES=node1:8080,node2:8081,node3:8082
+    networks:
+      - harmonydb-cluster
+    volumes:
+      - ./jepsen/results:/jepsen/results
+
+networks:
+  harmonydb-cluster:
+    driver: bridge

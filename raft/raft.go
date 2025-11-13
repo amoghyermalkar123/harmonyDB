@@ -6,14 +6,13 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
-	"os"
+	"strconv"
 	"sync"
 	"time"
 
-	"github.com/charmbracelet/log"
-
 	"harmonydb/raft/proto"
 
+	"go.uber.org/zap"
 	"google.golang.org/grpc"
 )
 
@@ -27,6 +26,7 @@ import (
 // followers are next in line candidates
 
 var ErrFailedToReplicate = errors.New("failed to replicate: majority response not received")
+var ErrNotALeader = errors.New("not a leader")
 
 type ConsensusState struct {
 	// latest term server has seen
@@ -166,9 +166,9 @@ type node struct {
 	logManager      *LogManager
 	cluster         map[int64]proto.RaftClient
 	leaderID        int64
+	leaderAddress   string // Cached leader HTTP address
 	matchIndex      map[int64]int64
 	nextIndex       map[int64]int64
-	logger          *log.Logger
 	sync.RWMutex
 }
 
@@ -177,13 +177,8 @@ func generateNodeID() int64 {
 }
 
 func newNode() *node {
-	l := log.NewWithOptions(os.Stdout, log.Options{
-		Level: log.DebugLevel,
-	})
-
 	return &node{
-		ID:     generateNodeID(),
-		logger: l,
+		ID: generateNodeID(),
 		meta: &Meta{
 			nt:         Follower,
 			nextIndex:  make(map[int]int64),
@@ -217,10 +212,10 @@ func (n *node) AppendEntriesRPC(ctx context.Context, in *proto.AppendEntries) (*
 		return nil, nil
 	}
 
-	log.Info("[START] AppendEntriesRPC", "sender", in.LeaderId, in.Entries[0].Data.Key, in.Entries[0].Data.Value)
+	getLogger().Info("Starting AppendEntries RPC", zap.String("component", "raft"), zap.Int64("sender", in.LeaderId), zap.String("key", string(in.Entries[0].Data.Key)), zap.String("value", string(in.Entries[0].Data.Value)))
 
 	defer func() {
-		log.Warn("[STOP] AppendEntriesRPC", in.Entries[0].Data.Key, in.Entries[0].Data.Value)
+		getLogger().Warn("Stopping AppendEntries RPC", zap.String("component", "raft"), zap.String("key", string(in.Entries[0].Data.Key)), zap.String("value", string(in.Entries[0].Data.Value)))
 	}()
 
 	// revert to a follower state if we get a term number higher than ours
@@ -229,7 +224,7 @@ func (n *node) AppendEntriesRPC(ctx context.Context, in *proto.AppendEntries) (*
 		n.meta.Lock()
 		if n.meta.nt == Leader {
 			n.meta.nt = Follower
-			log.Warn("Transitioned back to follower")
+			getLogger().Warn("Leader transitioned back to follower", zap.String("component", "raft"), zap.Int64("node_id", n.ID), zap.Int64("new_term", in.Term))
 		}
 		n.meta.Unlock()
 	}
@@ -238,7 +233,7 @@ func (n *node) AppendEntriesRPC(ctx context.Context, in *proto.AppendEntries) (*
 	// the CurrentTerm value we send as part of the response is read by the requester
 	// and update their own CurrentTerm
 	if n.state.currentTerm > in.Term {
-		log.Error("[X] rejecting append entries: stale term", n.state.currentTerm, in.Term)
+		getLogger().Error("Rejecting append entries due to stale term", zap.String("component", "raft"), zap.Int64("current_term", n.state.currentTerm), zap.Int64("incoming_term", in.Term))
 		return &proto.AppendEntriesResponse{
 			Success:     false,
 			CurrentTerm: n.state.currentTerm,
@@ -247,7 +242,7 @@ func (n *node) AppendEntriesRPC(ctx context.Context, in *proto.AppendEntries) (*
 
 	// there are gaps in our logs as those compared to the leader's
 	if in.PrevLogIdx > n.logManager.GetLastLogID() {
-		log.Error("[X] incoming log ahead of local max", in.PrevLogIdx, n.logManager.GetLastLogID())
+		getLogger().Error("Incoming log ahead of local max", zap.String("component", "raft"), zap.Int64("prev_log_idx", in.PrevLogIdx), zap.Int64("local_max", n.logManager.GetLastLogID()))
 		return &proto.AppendEntriesResponse{
 			Success: false,
 		}, nil
@@ -257,7 +252,7 @@ func (n *node) AppendEntriesRPC(ctx context.Context, in *proto.AppendEntries) (*
 	if in.PrevLogIdx > 0 {
 		if n.logManager.GetLog(int(in.PrevLogIdx)).GetTerm() != in.PrevLogTerm {
 			weird := n.logManager.GetLog(int(in.PrevLogIdx))
-			log.Error("[X] inconsistent state", "in.PrevLogIdx", in.PrevLogIdx, weird, in.PrevLogTerm)
+			getLogger().Error("Inconsistent log state", zap.String("component", "raft"), zap.Int64("prev_log_idx", in.PrevLogIdx), zap.Int64("local_term", weird.GetTerm()), zap.Int64("prev_log_term", in.PrevLogTerm))
 			return &proto.AppendEntriesResponse{
 				Success: false,
 			}, nil
@@ -277,12 +272,12 @@ func (n *node) AppendEntriesRPC(ctx context.Context, in *proto.AppendEntries) (*
 				// So we delete the entry at this index, and overwrite with the new incoming ones
 				n.logManager.TruncateAfter(int(entry.Id - 1))
 			} else {
-				n.logger.Debug("skipping entry", "entryid", entry.Id, "existing entry", existingEntry)
+				getLogger().Debug("Skipping existing entry", zap.String("component", "raft"), zap.Int64("entry_id", entry.Id))
 				continue
 			}
 		}
 
-		log.Info("[APPEND] new entry added", entry)
+		getLogger().Info("New log entry added", zap.String("component", "raft"), zap.Int64("entry_id", entry.Id), zap.Int64("term", entry.Term))
 		n.logManager.Append(entry)
 	}
 
@@ -302,7 +297,7 @@ func (n *node) AppendEntriesRPC(ctx context.Context, in *proto.AppendEntries) (*
 		n.meta.lastCommitIndex = min(in.LeaderCommitIdx, n.logManager.GetLastLogID())
 	}
 
-	log.Info("[Success] AppendEntries")
+	getLogger().Info("AppendEntries completed successfully", zap.String("component", "raft"), zap.Int64("node_id", n.ID))
 
 	return &proto.AppendEntriesResponse{
 		CurrentTerm: n.state.currentTerm,
@@ -353,7 +348,7 @@ func (n *node) RequestVoteRPC(ctx context.Context, in *proto.RequestVote) (*prot
 // log replication
 // TODO: only allow leader to replicate, otherwise re-route request to it
 func (n *node) replicate(ctx context.Context, key, val []byte) error {
-	log.Info("replicating", string(key), string(val))
+	getLogger().Info("Starting replication", zap.String("component", "raft"), zap.String("key", string(key)), zap.String("value", string(val)))
 
 	newlog := &proto.Log{
 		Term: n.state.currentTerm,
@@ -365,7 +360,7 @@ func (n *node) replicate(ctx context.Context, key, val []byte) error {
 		},
 	}
 
-	n.logger.Debug("newlog", "log", newlog)
+	getLogger().Debug("Created new log entry", zap.String("component", "raft"), zap.Int64("log_id", newlog.Id), zap.Int64("term", newlog.Term))
 
 	n.logManager.Append(newlog)
 
@@ -396,7 +391,7 @@ func (n *node) replicate(ctx context.Context, key, val []byte) error {
 		// log has been successfully applied to the state machine,
 		// now commit this log.
 		n.meta.lastCommitIndex = newlog.Id
-		log.Info("Successfully Replicated", "nextIndexes", n.nextIndex, "matchIndexes", n.matchIndex)
+		getLogger().Info("Log entry successfully replicated", zap.String("component", "raft"), zap.Int64("log_id", newlog.Id))
 		return nil
 	}
 
@@ -425,7 +420,7 @@ func (n *node) sendAppendEntries(peers []int64) ([]int64, error) {
 			prevLogTerm = lastLog.Term
 		}
 
-		n.logger.Debug("AppendRPC Before", "prevLogIndex", prevLogIndex, "prevLogTerm", prevLogTerm)
+		getLogger().Debug("Sending AppendEntries RPC", zap.String("component", "raft"), zap.Int64("prev_log_index", prevLogIndex), zap.Int64("prev_log_term", prevLogTerm))
 
 		resp, err := n.cluster[peer].AppendEntriesRPC(context.TODO(), &proto.AppendEntries{
 			Term:        n.state.currentTerm,
@@ -439,14 +434,14 @@ func (n *node) sendAppendEntries(peers []int64) ([]int64, error) {
 		// i.e. line 242
 		if err != nil {
 			failedPeers = append(failedPeers, peer)
-			n.logger.Debug("Peer added to failed", "peer", peer)
+			getLogger().Debug("Peer failed to respond", zap.String("component", "raft"), zap.Int64("peer_id", peer))
 		} else {
 			// this response means the node is telling us that the log
 			// consistency check has failed, so we decrement our nextIndex
 			// here
 			if !resp.Success && resp.CurrentTerm == 0 {
 				n.nextIndex[peer] -= 1
-				n.logger.Debug("LogMatchFail", "decremented next index for", peer)
+				getLogger().Debug("Log match failed, decremented next index", zap.String("component", "raft"), zap.Int64("peer_id", peer))
 				failedPeers = append(failedPeers, peer)
 			}
 
@@ -457,7 +452,7 @@ func (n *node) sendAppendEntries(peers []int64) ([]int64, error) {
 				n.meta.Lock()
 				if n.meta.nt == Leader {
 					n.meta.nt = Follower
-					log.Warn("Transitioned back to follower")
+					getLogger().Warn("Leader transitioned back to follower during replication", zap.String("component", "raft"), zap.Int64("node_id", n.ID))
 				}
 				n.meta.Unlock()
 			}
@@ -465,10 +460,10 @@ func (n *node) sendAppendEntries(peers []int64) ([]int64, error) {
 			if resp.Success {
 				n.matchIndex[peer] += 1
 				n.nextIndex[peer] += 2
-				n.logger.Info("Successfull rpc, advancing match and next indexes")
+				getLogger().Info("Successful RPC, advancing match and next indexes", zap.String("component", "raft"))
 			}
 
-			n.logger.Debug("debug indexes", "matchIndex", n.matchIndex, "nextIndex", n.nextIndex)
+			getLogger().Debug("Updated indexes", zap.String("component", "raft"))
 		}
 	}
 
@@ -481,7 +476,7 @@ func (n *node) sendAppendEntries(peers []int64) ([]int64, error) {
 
 func (n *node) startElection() {
 	electionTimeOut := time.NewTicker(electionTO)
-	log.Info("starting election routine")
+	getLogger().Info("Starting election routine", zap.String("component", "raft"), zap.Int64("node_id", n.ID))
 
 	for {
 		select {
@@ -497,7 +492,7 @@ func (n *node) startElection() {
 			// increment currentTerm
 			n.state.Lock()
 			n.state.currentTerm += 1
-			log.Info("Incremented current term", n.state.currentTerm)
+			getLogger().Info("Incremented current term for election", zap.String("component", "raft"), zap.Int64("node_id", n.ID), zap.Int64("term", n.state.currentTerm))
 			n.state.Unlock()
 
 			n.state.Lock()
@@ -508,7 +503,7 @@ func (n *node) startElection() {
 			// start election
 			votes := 1
 			for ni, node := range n.cluster {
-				log.Info("requesting for vote from", ni)
+				getLogger().Info("Requesting vote from peer", zap.String("component", "raft"), zap.Int64("peer_id", ni), zap.Int64("term", n.state.currentTerm))
 				voteResponse, err := node.RequestVoteRPC(context.TODO(), &proto.RequestVote{
 					Term:         n.state.currentTerm,
 					CandidateId:  n.ID,
@@ -528,7 +523,7 @@ func (n *node) startElection() {
 
 			}
 
-			log.Info("calculating votes")
+			getLogger().Info("Calculating election votes", zap.String("component", "raft"), zap.Int("votes_received", votes), zap.Int("required_majority", len(n.cluster)/2+1))
 
 			// elect leader if votes granted by more than half of the nodes
 			// present in the cluster
@@ -547,14 +542,14 @@ func (n *node) startElection() {
 		case entry := <-n.heartbeats:
 			// TODO: apply comitted entries
 			if n.meta.nt == Leader && entry.Term > n.state.currentTerm {
-				log.Info("transitioned to a follower")
+				getLogger().Info("Node transitioned to follower after election", zap.String("component", "raft"), zap.Int64("node_id", n.ID), zap.Int64("new_term", n.state.currentTerm))
 
 				// stop sending heartbeats
 				close(n.heartbeatCloser)
 
 				n.meta.Lock()
 				n.meta.nt = Follower
-				log.Warn("Transitioned back to follower")
+				getLogger().Warn("Node transitioned back to follower after failed election", zap.String("component", "raft"), zap.Int64("node_id", n.ID))
 				n.meta.Unlock()
 			}
 
@@ -563,7 +558,7 @@ func (n *node) startElection() {
 			// resetting the election timeout to represent
 			// up-to-date ness
 			electionTimeOut.Reset(electionTO)
-			log.Debug("node %d received leader heartbeat\n", n.ID)
+			getLogger().Debug("Node received leader heartbeat", zap.String("component", "raft"), zap.Int64("node_id", n.ID), zap.Int64("leader_term", entry.Term))
 		}
 	}
 }
@@ -618,21 +613,22 @@ func NewRaftServerWithConsul(port int) *Raft {
 	// Initialize Consul service discovery
 	discovery, err := NewConsulDiscovery(r.n.ID, port)
 	if err != nil {
-		fmt.Printf("❌ Failed to initialize Consul discovery: %v\n", err)
-		fmt.Println("💡 Make sure Consul is running: consul agent -dev")
+		getLogger().Error("Failed to initialize Consul discovery", zap.String("component", "raft"), zap.Int64("node_id", r.n.ID), zap.Int("port", port), zap.Error(err))
+		getLogger().Info("Make sure Consul is running: consul agent -dev", zap.String("component", "raft"))
 		panic(err)
 	}
 
 	// Register this node with Consul
 	if err := discovery.Register(); err != nil {
-		fmt.Printf("❌ Failed to register with Consul: %v\n", err)
+		getLogger().Error("Failed to register with Consul", zap.String("component", "raft"), zap.Int64("node_id", r.n.ID), zap.Error(err))
 		panic(err)
 	}
+	getLogger().Info("Successfully registered node with Consul", zap.String("component", "raft"), zap.Int64("node_id", r.n.ID), zap.Int("port", port))
 
 	// Discover and connect to existing peers
 	cluster, err := discovery.DiscoverPeers()
 	if err != nil {
-		fmt.Printf("⚠️  Initial peer discovery failed: %v\n", err)
+		getLogger().Warn("Initial peer discovery failed", zap.String("component", "raft"), zap.Int64("node_id", r.n.ID), zap.Error(err))
 	}
 	r.n.cluster = cluster
 
@@ -679,10 +675,10 @@ func (r *Raft) startWithPort(port int) {
 
 	lis, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", port))
 	if err != nil {
-		log.Fatalf("failed to listen on port %d: %v", port, err)
+		getLogger().Fatal("Failed to listen on port", zap.String("component", "raft"), zap.Int("port", port), zap.Error(err))
 	}
 
-	fmt.Printf("Raft server listening on port %d\n", port)
+	getLogger().Info("Raft server listening", zap.String("component", "raft"), zap.Int("port", port))
 	serv.Serve(lis)
 }
 
@@ -691,14 +687,66 @@ func (r *Raft) GetDiscovery() *ConsulDiscovery {
 	return r.discovery
 }
 
+func (r *Raft) GetLeader() proto.RaftClient {
+	return r.n.cluster[r.n.leaderID]
+}
+
+// GetLeaderID returns the current leader's node ID
+func (r *Raft) GetLeaderID() int64 {
+	r.n.RLock()
+	defer r.n.RUnlock()
+	return r.n.leaderID
+}
+
+// GetLeaderAddress returns the HTTP address of the current leader
+func (r *Raft) GetLeaderAddress() (string, error) {
+	leaderID := r.GetLeaderID()
+	if leaderID == 0 {
+		return "", fmt.Errorf("no leader elected")
+	}
+
+	if leaderID == r.n.ID {
+		return "", fmt.Errorf("this node is the leader")
+	}
+
+	// Use Consul to discover the leader's address
+	services, _, err := r.discovery.client.Health().Service(RaftServiceName, "", true, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to query consul for services: %v", err)
+	}
+
+	for _, service := range services {
+		nodeIDStr, exists := service.Service.Meta["node_id"]
+		if !exists {
+			continue
+		}
+
+		nodeID, err := strconv.ParseInt(nodeIDStr, 10, 64)
+		if err != nil {
+			continue
+		}
+
+		if nodeID == leaderID {
+			// Assuming HTTP server runs on port+1000 (you may need to adjust this)
+			httpPort := service.Service.Port + 1000
+			return fmt.Sprintf("http://%s:%d", service.Service.Address, httpPort), nil
+		}
+	}
+
+	return "", fmt.Errorf("leader address not found in consul")
+}
+
 // Put is a client side interface which is the main entry point for
 // log replication
 // TODO: add functionality to store the leader info
 func (r *Raft) Put(ctx context.Context, key, val []byte) error {
-	if r.n.meta.nt != Leader {
+	r.n.meta.RLock()
+	isLeader := r.n.meta.nt == Leader
+	r.n.meta.RUnlock()
+
+	if !isLeader {
 		// TODO: Forward request to leader
-		// return fmt.Errorf("node is not leader")
-		return nil
+		return ErrNotALeader
 	}
 	return r.n.replicate(ctx, key, val)
 }
@@ -750,4 +798,32 @@ func (n *node) GetLogs(ctx context.Context, req *proto.GetLogsRequest) (*proto.G
 	return &proto.GetLogsResponse{
 		Logs: logs,
 	}, nil
+}
+
+// GetNodeType returns the current node type (Leader, Follower, Candidate)
+func (r *Raft) GetNodeType() NodeType {
+	r.n.meta.RLock()
+	defer r.n.meta.RUnlock()
+	return r.n.meta.nt
+}
+
+// GetCurrentTerm returns the current term
+func (r *Raft) GetCurrentTerm() int64 {
+	r.n.state.Lock()
+	defer r.n.state.Unlock()
+	return r.n.state.currentTerm
+}
+
+// String method for NodeType
+func (nt NodeType) String() string {
+	switch nt {
+	case Follower:
+		return "Follower"
+	case Candidate:
+		return "Candidate"
+	case Leader:
+		return "Leader"
+	default:
+		return "Unknown"
+	}
 }

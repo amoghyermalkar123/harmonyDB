@@ -1,4 +1,4 @@
-### Intro:
+## Intro:
 
 A toy database for learning purposes.
 

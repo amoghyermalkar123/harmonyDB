@@ -14,7 +14,7 @@ type BTree struct {
 }
 
 func NewBTree() *BTree {
-	f, err := newFileStore("/tmp/data")
+	f, err := newFileStore("harmony.db")
 	if err != nil {
 		panic(fmt.Errorf("file store: %w", err))
 	}

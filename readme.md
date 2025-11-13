@@ -51,3 +51,25 @@ More often than not procrastination is a result rather than a cause. I am not pr
 I don't want to study. I procrastinated because I was unsure what I wanted to achieve today. Planning
 is the answer. Some days the session can be short/ some days longer. Not everyday can be productive but
 I need to plan everyday with clear actions so that I progress each day, instead of only some.
+
+[11/11] Had this idea where shapes of data are replicated differently. One shape of data is always strongly
+replicated and other shape of data is always eventually replicated.
+
+[12/11] Facing issues witht testing my database beyond the basic local testing and unit tests. Tried researching
+how actual DB's do it but all i can find is jepsen. But it's a steep journey because then I would have to learn
+clojure. For which I just don't have any time right now. For now I am going to check a bit in depth if i can find
+what etcd and cockroach db do.
+Ok after much finding I figured out that jepsen is really only the tool that is battle tested and worth of using
+in actual databases. Since I tried maelstrom and faced issues, for one it requires the db to implement it's
+protocol and network api's/infra to communicate. Since I have already written my basic draft of distrbuted db
+It's a hassle to go back and change things just so I can test it with maelstrom - this is not worth it. I think
+I will continue on my journey to learn more and introduce more things in my database for now and will be relying
+on basic unit tests, local tests.
+In the future I also plan to deploy this to my rpi for stress testing.
+As for jepsen testing - my database will never be a serious project. It will be serious enough for me to learn
+alot from DB engineering. So I will learn clojure and jepsen a little later. For now the main focus is to learn
+by building a lot and then creating some learning material to cement my knowledge.
+
+the best way would be that when I'm satisfied enough with this distributed database project, my mind will be at ease
+and then I will take up clojure & jepsen for test my distributed db with those then. For now, we're good with
+sticking to the basics.

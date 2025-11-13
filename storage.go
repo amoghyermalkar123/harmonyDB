@@ -7,8 +7,6 @@ import (
 	"os"
 	"sync"
 	"time"
-
-	"github.com/charmbracelet/log"
 )
 
 type fileStore struct {
@@ -35,7 +33,6 @@ func newFileStore(path string) (*fileStore, error) {
 		for {
 			select {
 			case <-ticker.C:
-				log.Warn("[DISK] Flushing Pages")
 				if err := f.flushPages(); err != nil {
 					panic(fmt.Errorf("flushPages(): %w", err))
 				}
