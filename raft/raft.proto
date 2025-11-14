@@ -63,6 +63,4 @@ message GetLogsResponse {
 service Raft {
   rpc AppendEntriesRPC(AppendEntries) returns (AppendEntriesResponse) {};
   rpc RequestVoteRPC(RequestVote) returns (RequestVoteResponse) {};
-  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse) {};
-  rpc GetLogs(GetLogsRequest) returns (GetLogsResponse) {};
 }

@@ -43,8 +43,8 @@ func InitLogger(port int) error {
 
 	// Create multi-output core
 	core := zapcore.NewTee(
-		zapcore.NewCore(consoleEncoder, zapcore.AddSync(os.Stdout), zap.InfoLevel),
-		zapcore.NewCore(fileEncoder, zapcore.AddSync(logFile), zap.DebugLevel),
+		zapcore.NewCore(consoleEncoder, zapcore.AddSync(os.Stdout), zap.DebugLevel),
+		zapcore.NewCore(fileEncoder, zapcore.AddSync(logFile), zap.ErrorLevel),
 	)
 
 	Logger = zap.New(core, zap.AddCaller(), zap.AddStacktrace(zapcore.ErrorLevel))

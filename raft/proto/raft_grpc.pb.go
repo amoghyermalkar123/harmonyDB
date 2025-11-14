@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.5.1
 // - protoc             v6.33.0
-// source: raft.proto
+// source: raft/raft.proto
 
 package proto
 
@@ -21,8 +21,6 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	Raft_AppendEntriesRPC_FullMethodName = "/raft.Raft/AppendEntriesRPC"
 	Raft_RequestVoteRPC_FullMethodName   = "/raft.Raft/RequestVoteRPC"
-	Raft_GetStatus_FullMethodName        = "/raft.Raft/GetStatus"
-	Raft_GetLogs_FullMethodName          = "/raft.Raft/GetLogs"
 )
 
 // RaftClient is the client API for Raft service.
@@ -31,8 +29,6 @@ const (
 type RaftClient interface {
 	AppendEntriesRPC(ctx context.Context, in *AppendEntries, opts ...grpc.CallOption) (*AppendEntriesResponse, error)
 	RequestVoteRPC(ctx context.Context, in *RequestVote, opts ...grpc.CallOption) (*RequestVoteResponse, error)
-	GetStatus(ctx context.Context, in *GetStatusRequest, opts ...grpc.CallOption) (*GetStatusResponse, error)
-	GetLogs(ctx context.Context, in *GetLogsRequest, opts ...grpc.CallOption) (*GetLogsResponse, error)
 }
 
 type raftClient struct {
@@ -63,34 +59,12 @@ func (c *raftClient) RequestVoteRPC(ctx context.Context, in *RequestVote, opts .
 	return out, nil
 }
 
-func (c *raftClient) GetStatus(ctx context.Context, in *GetStatusRequest, opts ...grpc.CallOption) (*GetStatusResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(GetStatusResponse)
-	err := c.cc.Invoke(ctx, Raft_GetStatus_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *raftClient) GetLogs(ctx context.Context, in *GetLogsRequest, opts ...grpc.CallOption) (*GetLogsResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(GetLogsResponse)
-	err := c.cc.Invoke(ctx, Raft_GetLogs_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
 // RaftServer is the server API for Raft service.
 // All implementations must embed UnimplementedRaftServer
 // for forward compatibility.
 type RaftServer interface {
 	AppendEntriesRPC(context.Context, *AppendEntries) (*AppendEntriesResponse, error)
 	RequestVoteRPC(context.Context, *RequestVote) (*RequestVoteResponse, error)
-	GetStatus(context.Context, *GetStatusRequest) (*GetStatusResponse, error)
-	GetLogs(context.Context, *GetLogsRequest) (*GetLogsResponse, error)
 	mustEmbedUnimplementedRaftServer()
 }
 
@@ -106,12 +80,6 @@ func (UnimplementedRaftServer) AppendEntriesRPC(context.Context, *AppendEntries)
 }
 func (UnimplementedRaftServer) RequestVoteRPC(context.Context, *RequestVote) (*RequestVoteResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method RequestVoteRPC not implemented")
-}
-func (UnimplementedRaftServer) GetStatus(context.Context, *GetStatusRequest) (*GetStatusResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method GetStatus not implemented")
-}
-func (UnimplementedRaftServer) GetLogs(context.Context, *GetLogsRequest) (*GetLogsResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method GetLogs not implemented")
 }
 func (UnimplementedRaftServer) mustEmbedUnimplementedRaftServer() {}
 func (UnimplementedRaftServer) testEmbeddedByValue()              {}
@@ -170,42 +138,6 @@ func _Raft_RequestVoteRPC_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Raft_GetStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(GetStatusRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(RaftServer).GetStatus(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Raft_GetStatus_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(RaftServer).GetStatus(ctx, req.(*GetStatusRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _Raft_GetLogs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(GetLogsRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(RaftServer).GetLogs(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Raft_GetLogs_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(RaftServer).GetLogs(ctx, req.(*GetLogsRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
 // Raft_ServiceDesc is the grpc.ServiceDesc for Raft service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -221,15 +153,7 @@ var Raft_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "RequestVoteRPC",
 			Handler:    _Raft_RequestVoteRPC_Handler,
 		},
-		{
-			MethodName: "GetStatus",
-			Handler:    _Raft_GetStatus_Handler,
-		},
-		{
-			MethodName: "GetLogs",
-			Handler:    _Raft_GetLogs_Handler,
-		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "raft.proto",
+	Metadata: "raft/raft.proto",
 }

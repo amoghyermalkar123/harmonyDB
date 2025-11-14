@@ -23,6 +23,7 @@
   - Write-ahead logging for crash recovery
   - Log replay mechanisms
   - Durability vs performance tradeoffs
+  - design based on etcd
 - [ ] **Log Compaction** - Essential for any real Raft deployment
   - Snapshot creation and restoration
   - Log truncation logic
