@@ -10,15 +10,15 @@ import (
 	"google.golang.org/grpc"
 )
 
-func NewRaftServerWithConsul(port int) *Raft {
+func NewRaftServerWithConsul(raftPort int, httpPort int) *Raft {
 	r := &Raft{
 		n: newRaftNode(),
 	}
 
 	// Initialize Consul service discovery
-	discovery, err := NewConsulDiscovery(r.n.ID, port)
+	discovery, err := NewConsulDiscovery(r.n.ID, raftPort, httpPort)
 	if err != nil {
-		getLogger().Error("Failed to initialize Consul discovery", zap.String("component", "raft"), zap.Int64("node_id", r.n.ID), zap.Int("port", port), zap.Error(err))
+		getLogger().Error("Failed to initialize Consul discovery", zap.String("component", "raft"), zap.Int64("node_id", r.n.ID), zap.Int("raft_port", raftPort), zap.Int("http_port", httpPort), zap.Error(err))
 		getLogger().Info("Make sure Consul is running: consul agent -dev", zap.String("component", "raft"))
 		panic(err)
 	}
@@ -28,7 +28,7 @@ func NewRaftServerWithConsul(port int) *Raft {
 		getLogger().Error("Failed to register with Consul", zap.String("component", "raft"), zap.Int64("node_id", r.n.ID), zap.Error(err))
 		panic(err)
 	}
-	getLogger().Info("Successfully registered node with Consul", zap.String("component", "raft"), zap.Int64("node_id", r.n.ID), zap.Int("port", port))
+	getLogger().Info("Successfully registered node with Consul", zap.String("component", "raft"), zap.Int64("node_id", r.n.ID), zap.Int("raft_port", raftPort), zap.Int("http_port", httpPort))
 
 	// Discover and connect to existing peers
 	cluster, err := discovery.DiscoverPeers()
@@ -57,7 +57,7 @@ func NewRaftServerWithConsul(port int) *Raft {
 	// Store discovery reference for cleanup
 	r.discovery = discovery
 
-	go r.startWithPort(port)
+	go r.startWithPort(raftPort)
 	go r.n.startElection()
 
 	return r
@@ -68,7 +68,7 @@ func (r *Raft) startWithPort(port int) {
 
 	proto.RegisterRaftServer(serv, r.n)
 
-	lis, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", port))
+	lis, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", port))
 	if err != nil {
 		getLogger().Fatal("Failed to listen on port", zap.String("component", "raft"), zap.Int("port", port), zap.Error(err))
 	}
@@ -122,8 +122,17 @@ func (r *Raft) GetLeaderAddress() (string, error) {
 		}
 
 		if nodeID == leaderID {
-			// Assuming HTTP server runs on port+1000 (you may need to adjust this)
-			httpPort := service.Service.Port + 1000
+			// Get HTTP port from service metadata
+			httpPortStr, exists := service.Service.Meta["http_port"]
+			if !exists {
+				return "", fmt.Errorf("http_port not found in leader's service metadata")
+			}
+
+			httpPort, err := strconv.Atoi(httpPortStr)
+			if err != nil {
+				return "", fmt.Errorf("invalid http_port in leader's service metadata: %s", httpPortStr)
+			}
+
 			return fmt.Sprintf("http://%s:%d", service.Service.Address, httpPort), nil
 		}
 	}

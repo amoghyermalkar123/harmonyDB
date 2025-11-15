@@ -13,10 +13,11 @@ import (
 )
 
 func main() {
-	port := getPortFromEnv()
+	httpPort := getPortFromEnv()
+	raftPort := getRaftPortFromEnv()
 
 	// Initialize global logger
-	if err := harmonydb.InitLogger(port); err != nil {
+	if err := harmonydb.InitLogger(httpPort); err != nil {
 		fmt.Printf("Failed to initialize logger: %v\n", err)
 		os.Exit(1)
 	}
@@ -26,9 +27,9 @@ func main() {
 	// Set logger for raft package
 	raft.SetLogger(harmonydb.GetLogger())
 
-	server := api.NewHTTPServer(port)
+	server := api.NewHTTPServerWithRaftPort(httpPort, raftPort)
 
-	harmonydb.GetLogger().Info("Starting HarmonyDB server", zap.String("component", "main"), zap.Int("port", port))
+	harmonydb.GetLogger().Info("Starting HarmonyDB server", zap.String("component", "main"), zap.Int("http_port", httpPort), zap.Int("raft_port", raftPort))
 
 	if err := server.Start(); err != nil {
 		harmonydb.GetLogger().Error("Server error", zap.String("component", "main"), zap.Error(err))
@@ -45,6 +46,21 @@ func getPortFromEnv() int {
 	if err != nil {
 		fmt.Printf("Invalid PORT environment variable: %s, using default 8080\n", portStr)
 		return 8080
+	}
+
+	return port
+}
+
+func getRaftPortFromEnv() int {
+	portStr := os.Getenv("RAFT_PORT")
+	if portStr == "" {
+		portStr = "9090"
+	}
+
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		fmt.Printf("Invalid RAFT_PORT environment variable: %s, using default 9090\n", portStr)
+		return 9090
 	}
 
 	return port

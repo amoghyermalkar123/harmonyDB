@@ -3,6 +3,8 @@ package raft
 import (
 	"context"
 	"fmt"
+	"net"
+	"os"
 	"strconv"
 	"time"
 
@@ -21,11 +23,18 @@ type ConsulDiscovery struct {
 	client   *consul.Client
 	nodeID   int64
 	nodePort int
+	httpPort int
 }
 
-func NewConsulDiscovery(nodeID int64, nodePort int) (*ConsulDiscovery, error) {
+func NewConsulDiscovery(nodeID int64, nodePort int, httpPort int) (*ConsulDiscovery, error) {
 	config := consul.DefaultConfig()
-	config.Address = ConsulAddress
+
+	// Use environment variable if available
+	if consulAddr := os.Getenv("CONSUL_ADDR"); consulAddr != "" {
+		config.Address = consulAddr
+	} else {
+		config.Address = ConsulAddress
+	}
 
 	client, err := consul.NewClient(config)
 	if err != nil {
@@ -35,38 +44,46 @@ func NewConsulDiscovery(nodeID int64, nodePort int) (*ConsulDiscovery, error) {
 	// Test connection to Consul
 	_, err = client.Status().Leader()
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to consul at %s: %v", ConsulAddress, err)
+		return nil, fmt.Errorf("failed to connect to consul at %s: %v", config.Address, err)
 	}
 
 	return &ConsulDiscovery{
 		client:   client,
 		nodeID:   nodeID,
 		nodePort: nodePort,
+		httpPort: httpPort,
 	}, nil
 }
 
 func (cd *ConsulDiscovery) Register() error {
 	serviceID := fmt.Sprintf("raft-node-%d", cd.nodeID)
 
+	// Get the actual IP address of this container/host
+	nodeAddress, err := cd.getNodeAddress()
+	if err != nil {
+		return fmt.Errorf("failed to get node address: %v", err)
+	}
+
 	service := &consul.AgentServiceRegistration{
 		ID:      serviceID,
 		Name:    RaftServiceName,
 		Port:    cd.nodePort,
-		Address: "127.0.0.1",
+		Address: nodeAddress,
 		Tags:    []string{"raft", "consensus", fmt.Sprintf("node-id-%d", cd.nodeID)},
 		Meta: map[string]string{
-			"node_id": strconv.FormatInt(cd.nodeID, 10),
-			"version": "1.0",
+			"node_id":   strconv.FormatInt(cd.nodeID, 10),
+			"http_port": strconv.Itoa(cd.httpPort),
+			"version":   "1.0",
 		},
 		Check: &consul.AgentServiceCheck{
-			TCP:                            fmt.Sprintf("127.0.0.1:%d", cd.nodePort),
+			TCP:                            fmt.Sprintf("%s:%d", nodeAddress, cd.nodePort),
 			Interval:                       "10s",
 			Timeout:                        "3s",
 			DeregisterCriticalServiceAfter: "30s",
 		},
 	}
 
-	err := cd.client.Agent().ServiceRegister(service)
+	err = cd.client.Agent().ServiceRegister(service)
 	if err != nil {
 		return fmt.Errorf("failed to register service: %v", err)
 	}
@@ -131,6 +148,33 @@ func (cd *ConsulDiscovery) connectToPeer(address string) (proto.RaftClient, erro
 	}
 
 	return proto.NewRaftClient(conn), nil
+}
+
+func (cd *ConsulDiscovery) getNodeAddress() (string, error) {
+	// Check if NODE_ADDRESS environment variable is set (useful for containerized environments)
+	if nodeAddr := os.Getenv("NODE_ADDRESS"); nodeAddr != "" {
+		return nodeAddr, nil
+	}
+
+	// In containerized environments, use the container's hostname as the address
+	if hostname, err := os.Hostname(); err == nil {
+		// Check if hostname looks like a container ID (12 char hex)
+		if len(hostname) == 12 {
+			// This looks like a Docker container, return hostname
+			return hostname, nil
+		}
+	}
+
+	// Fallback: determine the local IP that would be used to reach consul
+	conn, err := net.Dial("udp", "consul:8500")
+	if err != nil {
+		// Final fallback to localhost (for local development)
+		return "127.0.0.1", nil
+	}
+	defer conn.Close()
+
+	localAddr := conn.LocalAddr().(*net.UDPAddr)
+	return localAddr.IP.String(), nil
 }
 
 func (cd *ConsulDiscovery) WatchForChanges(updateCluster func(map[int64]proto.RaftClient)) {

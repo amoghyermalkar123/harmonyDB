@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,14 +38,18 @@ type Response struct {
 }
 
 func NewHTTPServer(port int) *HTTPServer {
-	db, err := harmonydb.Open(port)
+	return NewHTTPServerWithRaftPort(port, port+1010)
+}
+
+func NewHTTPServerWithRaftPort(httpPort, raftPort int) *HTTPServer {
+	db, err := harmonydb.Open(raftPort, httpPort)
 	if err != nil {
 		panic(fmt.Errorf("open db: %w", err))
 	}
 
 	return &HTTPServer{
 		db:   db,
-		port: port,
+		port: httpPort,
 	}
 }
 
@@ -56,6 +61,8 @@ func (h *HTTPServer) Start() error {
 	mux.HandleFunc("/put", h.handlePut)
 
 	mux.HandleFunc("/get", h.handleGet)
+
+	mux.HandleFunc("/leader", h.handleLeader)
 
 	h.server = &http.Server{
 		Addr:         fmt.Sprintf(":%d", h.port),
@@ -112,7 +119,19 @@ func (h *HTTPServer) handlePut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.db.Put([]byte(req.Key), []byte(req.Value)); err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
+		harmonydb.GetLogger().Error("PUT operation failed", zap.String("component", "api"), zap.String("key", req.Key), zap.Error(err))
+
+		// Check if this might be a redirection failure or other specific error
+		response := Response{Success: false, Error: err.Error()}
+
+		// If the error suggests leadership issues, use 503 Service Unavailable
+		if strings.Contains(err.Error(), "leader") || strings.Contains(err.Error(), "redirect") {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		} else {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+
+		json.NewEncoder(w).Encode(response)
 		return
 	}
 
@@ -145,13 +164,41 @@ func (h *HTTPServer) handleGet(w http.ResponseWriter, r *http.Request) {
 
 	val, err := h.db.Get([]byte(req.Key))
 	if err != nil {
+		response := Response{Success: false, Error: fmt.Sprintf("Get failed: %v", err)}
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(fmt.Errorf("Get :%w", err).Error()))
+		json.NewEncoder(w).Encode(response)
+		return
 	}
 
 	response := Response{
 		Success: true,
 		Value:   string(val),
+	}
+
+	json.NewEncoder(w).Encode(response)
+}
+
+func (h *HTTPServer) handleLeader(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	// Access the raft instance through the database
+	leaderID := h.db.GetLeaderID()
+	if leaderID == 0 {
+		response := Response{Success: false, Error: "No leader elected"}
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+
+	response := Response{
+		Success: true,
+		Value:   fmt.Sprintf("%d", leaderID),
+		Message: "Current leader ID",
 	}
 
 	json.NewEncoder(w).Encode(response)

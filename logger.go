@@ -14,8 +14,14 @@ func InitLogger(port int) error {
 	config := zap.NewProductionConfig()
 	config.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
 
-	// Create file output
-	logFile, err := os.OpenFile(fmt.Sprintf("/opt/homebrew/var/log/harmony_%d.log", port), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	// Create file output - use container-appropriate path
+	logDir := "/var/log/harmonydb"
+	if _, err := os.Stat("/opt/homebrew/var/log"); err == nil {
+		logDir = "/opt/homebrew/var/log" // Local development
+	}
+
+	logPath := fmt.Sprintf("%s/harmony_%d.log", logDir, port)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 	if err != nil {
 		return err
 	}

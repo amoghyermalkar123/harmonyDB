@@ -1,0 +1,39 @@
+# Build artifacts
+harmonydb
+harmonydb-server
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+coverage.out
+coverage.html
+test-results/
+
+# Development files
+.git/
+.gitignore
+README.md
+*.md
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
+
+# Temporary files
+/tmp/
+*.tmp
+
+# Test containers
+docker-compose*.yml
