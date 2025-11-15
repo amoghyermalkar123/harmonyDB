@@ -119,8 +119,6 @@ func (h *HTTPServer) handlePut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.db.Put([]byte(req.Key), []byte(req.Value)); err != nil {
-		harmonydb.GetLogger().Error("PUT operation failed", zap.String("component", "api"), zap.String("key", req.Key), zap.Error(err))
-
 		// Check if this might be a redirection failure or other specific error
 		response := Response{Success: false, Error: err.Error()}
 

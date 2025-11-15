@@ -12,7 +12,7 @@ var Logger *zap.Logger
 
 func InitLogger(port int) error {
 	config := zap.NewProductionConfig()
-	config.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
+	config.Level = zap.NewAtomicLevelAt(zap.ErrorLevel)
 
 	// Create file output - use container-appropriate path
 	logDir := "/var/log/harmonydb"
@@ -49,7 +49,7 @@ func InitLogger(port int) error {
 
 	// Create multi-output core
 	core := zapcore.NewTee(
-		zapcore.NewCore(consoleEncoder, zapcore.AddSync(os.Stdout), zap.DebugLevel),
+		zapcore.NewCore(consoleEncoder, zapcore.AddSync(os.Stdout), zap.ErrorLevel),
 		zapcore.NewCore(fileEncoder, zapcore.AddSync(logFile), zap.ErrorLevel),
 	)
 

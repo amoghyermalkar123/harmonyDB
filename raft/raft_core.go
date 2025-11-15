@@ -440,7 +440,6 @@ func (n *raftNode) startElection() {
 				continue
 			}
 
-			fmt.Println("leader timed out, standing for new elections", len(n.cluster))
 			electionTimeOut.Reset(electionTO)
 
 			// increment currentTerm
@@ -486,10 +485,11 @@ func (n *raftNode) startElection() {
 				n.meta.nt = Leader
 				n.meta.Unlock()
 
-				n.heartbeatCloser = make(chan struct{})
+				n.Lock()
+				n.leaderID = n.ID
+				n.Unlock()
 
-				fmt.Printf("node %d is now leader, with term: %d\n", n.ID, n.state.currentTerm)
-				fmt.Printf("starting heartbeats...")
+				n.heartbeatCloser = make(chan struct{})
 
 				go n.sendHeartbeats()
 			}
