@@ -11,7 +11,6 @@ package raft
 import (
 	"context"
 	"errors"
-	"fmt"
 	"math/rand"
 
 	"sync"
@@ -21,6 +20,7 @@ import (
 	"harmonydb/wal"
 
 	"go.uber.org/zap"
+	"google.golang.org/grpc"
 )
 
 var ErrFailedToReplicate = errors.New("failed to replicate: majority response not received")
@@ -59,19 +59,20 @@ type Meta struct {
 }
 
 type Raft struct {
-	n         *raftNode
-	discovery *ConsulDiscovery
+	n      *raftNode
+	config ClusterConfig
+	server *grpc.Server
 }
 
 func (n *Raft) Ready() chan ToApply {
 	return n.n.applyc
 }
 
-//var electionTO = time.Duration(10+rand.Intn(10)) * time.Millisecond
-//var heartbeatTO = time.Duration(1+rand.Intn(10)) * time.Millisecond
+var electionTO = time.Duration(150+rand.Intn(150)) * time.Millisecond
+var heartbeatTO = time.Duration(50) * time.Millisecond
 
-var electionTO = time.Duration(1100+rand.Intn(1000)+rand.Intn(999)) * time.Millisecond
-var heartbeatTO = time.Duration(500+rand.Intn(500)) * time.Millisecond
+// var electionTO = time.Duration(1100+rand.Intn(1000)+rand.Intn(999)) * time.Millisecond
+// var heartbeatTO = time.Duration(500+rand.Intn(500)) * time.Millisecond
 
 type NodeType int8
 
@@ -97,7 +98,6 @@ type raftNode struct {
 	logManager      *wal.LogManager
 	cluster         map[int64]proto.RaftClient
 	leaderID        int64
-	leaderAddress   string // Cached leader HTTP address
 	matchIndex      map[int64]int64
 	nextIndex       map[int64]int64
 	sync.RWMutex
@@ -165,10 +165,6 @@ func (n *raftNode) AppendEntriesRPC(ctx context.Context, in *proto.AppendEntries
 	}
 
 	getLogger().Info("Starting AppendEntries RPC", zap.String("component", "raft"), zap.Int64("sender", in.LeaderId), zap.String("key", string(in.Entries[0].Data.Key)), zap.String("value", string(in.Entries[0].Data.Value)))
-
-	defer func() {
-		getLogger().Warn("Stopping AppendEntries RPC", zap.String("component", "raft"), zap.String("key", string(in.Entries[0].Data.Key)), zap.String("value", string(in.Entries[0].Data.Value)))
-	}()
 
 	// revert to a follower state if we get a term number higher than ours
 	if n.state.currentTerm < in.Term {
@@ -249,8 +245,6 @@ func (n *raftNode) AppendEntriesRPC(ctx context.Context, in *proto.AppendEntries
 		n.meta.lastCommitIndex = min(in.LeaderCommitIdx, n.logManager.GetLastLogID())
 	}
 
-	getLogger().Info("AppendEntries completed successfully", zap.String("component", "raft"), zap.Int64("node_id", n.ID))
-
 	return &proto.AppendEntriesResponse{
 		CurrentTerm: n.state.currentTerm,
 		Success:     true,
@@ -312,8 +306,6 @@ func (n *raftNode) replicate(ctx context.Context, key, val []byte) error {
 		},
 	}
 
-	getLogger().Debug("Created new log entry", zap.String("component", "raft"), zap.Int64("log_id", newlog.Id), zap.Int64("term", newlog.Term))
-
 	n.logManager.Append(newlog)
 
 	peers := []int64{}
@@ -344,7 +336,7 @@ func (n *raftNode) replicate(ctx context.Context, key, val []byte) error {
 		// now commit this log.
 		n.CommitIdx(newlog.Id)
 
-		getLogger().Info("Log entry successfully replicated", zap.String("component", "raft"), zap.Int64("log_id", newlog.Id))
+		getLogger().Info("Log entry successfully replicated", zap.String("component", "raft"), zap.Int64("log_id", newlog.Id), zap.Int64("commit_index", newlog.Id))
 
 		return nil
 	}
@@ -377,11 +369,12 @@ func (n *raftNode) sendAppendEntries(peers []int64) ([]int64, error) {
 		getLogger().Debug("Sending AppendEntries RPC", zap.String("component", "raft"), zap.Int64("prev_log_index", prevLogIndex), zap.Int64("prev_log_term", prevLogTerm))
 
 		resp, err := n.cluster[peer].AppendEntriesRPC(context.TODO(), &proto.AppendEntries{
-			Term:        n.state.currentTerm,
-			LeaderId:    n.ID,
-			PrevLogIdx:  prevLogIndex,
-			PrevLogTerm: prevLogTerm,
-			Entries:     n.logManager.GetLogsAfter(n.nextIndex[peer]),
+			Term:            n.state.currentTerm,
+			LeaderId:        n.ID,
+			PrevLogIdx:      prevLogIndex,
+			PrevLogTerm:     prevLogTerm,
+			Entries:         n.logManager.GetLogsAfter(n.nextIndex[peer]),
+			LeaderCommitIdx: n.meta.lastCommitIndex,
 		})
 
 		// TODO: decrement nextIndex when log consistency check fails
@@ -417,7 +410,6 @@ func (n *raftNode) sendAppendEntries(peers []int64) ([]int64, error) {
 				getLogger().Info("Successful RPC, advancing match and next indexes", zap.String("component", "raft"))
 			}
 
-			getLogger().Debug("Updated indexes", zap.String("component", "raft"))
 		}
 	}
 
@@ -429,23 +421,29 @@ func (n *raftNode) sendAppendEntries(peers []int64) ([]int64, error) {
 }
 
 func (n *raftNode) startElection() {
-	electionTimeOut := time.NewTicker(electionTO)
-	getLogger().Info("Starting election routine", zap.String("component", "raft"), zap.Int64("node_id", n.ID))
+	// Use random election timeout for each node to prevent split votes
+	// Use node ID as part of the seed to ensure different nodes get different timeouts
+	r := rand.New(rand.NewSource(time.Now().UnixNano() + n.ID))
+	electionTimeout := time.Duration(150+r.Intn(150)) * time.Millisecond
+	electionTimeOut := time.NewTicker(electionTimeout)
+	getLogger().Info("Starting election routine", zap.String("component", "raft"), zap.Int64("node_id", n.ID), zap.Duration("timeout", electionTimeout))
 
 	for {
 		select {
 		case <-electionTimeOut.C:
 			if n.meta.nt == Leader || len(n.cluster) < 2 {
-				electionTimeOut.Reset(electionTO)
+				newTimeout := time.Duration(150+r.Intn(150)) * time.Millisecond
+				electionTimeOut.Reset(newTimeout)
 				continue
 			}
 
-			electionTimeOut.Reset(electionTO)
+			// Reset with new random timeout after this election attempt
+			newTimeout := time.Duration(150+r.Intn(150)) * time.Millisecond
+			electionTimeOut.Reset(newTimeout)
 
 			// increment currentTerm
 			n.state.Lock()
 			n.state.currentTerm += 1
-			getLogger().Info("Incremented current term for election", zap.String("component", "raft"), zap.Int64("node_id", n.ID), zap.Int64("term", n.state.currentTerm))
 			n.state.Unlock()
 
 			n.state.Lock()
@@ -455,8 +453,7 @@ func (n *raftNode) startElection() {
 			// transition to candiadte
 			// start election
 			votes := 1
-			for ni, node := range n.cluster {
-				getLogger().Info("Requesting vote from peer", zap.String("component", "raft"), zap.Int64("peer_id", ni), zap.Int64("term", n.state.currentTerm))
+			for _, node := range n.cluster {
 				voteResponse, err := node.RequestVoteRPC(context.TODO(), &proto.RequestVote{
 					Term:         n.state.currentTerm,
 					CandidateId:  n.ID,
@@ -465,8 +462,6 @@ func (n *raftNode) startElection() {
 				})
 
 				if err != nil {
-					// TODO: better error handling
-					fmt.Printf("request vote rpc: %v", err)
 					continue
 				}
 
@@ -475,8 +470,6 @@ func (n *raftNode) startElection() {
 				}
 
 			}
-
-			getLogger().Info("Calculating election votes", zap.String("component", "raft"), zap.Int("votes_received", votes), zap.Int("required_majority", len(n.cluster)/2+1))
 
 			// elect leader if votes granted by more than half of the nodes
 			// present in the cluster
@@ -496,8 +489,6 @@ func (n *raftNode) startElection() {
 		case entry := <-n.heartbeats:
 			// TODO: apply comitted entries
 			if n.meta.nt == Leader && entry.Term > n.state.currentTerm {
-				getLogger().Info("Node transitioned to follower after election", zap.String("component", "raft"), zap.Int64("node_id", n.ID), zap.Int64("new_term", n.state.currentTerm))
-
 				// stop sending heartbeats
 				close(n.heartbeatCloser)
 
@@ -511,7 +502,8 @@ func (n *raftNode) startElection() {
 			// the leader is sending us the heartbeats
 			// resetting the election timeout to represent
 			// up-to-date ness
-			electionTimeOut.Reset(electionTO)
+			newTimeout := time.Duration(150+r.Intn(150)) * time.Millisecond
+			electionTimeOut.Reset(newTimeout)
 			getLogger().Debug("Node received leader heartbeat", zap.String("component", "raft"), zap.Int64("node_id", n.ID), zap.Int64("leader_term", entry.Term))
 		}
 	}
@@ -545,27 +537,11 @@ func (n *raftNode) sendHeartbeats() {
 				})
 
 				if err != nil {
-					fmt.Printf("append entries rpc: heartbeat : %v", err)
 					continue
 				}
 			}
 		}
 	}
-}
-
-// Put is a client side interface which is the main entry point for
-// log replication
-// TODO: add functionality to store the leader info
-func (r *Raft) Put(ctx context.Context, key, val []byte) error {
-	r.n.meta.RLock()
-	isLeader := r.n.meta.nt == Leader
-	r.n.meta.RUnlock()
-
-	if !isLeader {
-		// TODO: Forward request to leader
-		return ErrNotALeader
-	}
-	return r.n.replicate(ctx, key, val)
 }
 
 func (r *Raft) GetLastAppliedLastCommitted() (int64, int64) {

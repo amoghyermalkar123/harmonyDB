@@ -17,7 +17,6 @@
   - Implement load testing framework (k6 scripts, custom Go clients)
   - Add distributed tracing with OpenTelemetry/Jaeger
 
-
 ### Phase 1: Core Distributed Features (High Impact)
 - [ ] **WAL Implementation** - Learn durability guarantees
   - Write-ahead logging for crash recovery
@@ -46,6 +45,10 @@
   - Two-phase commit protocol
   - Coordinator and participant roles
   - Failure recovery mechanisms
+- [ ] **Linearizable Feature**
+  - Different isolation levels implementation
+  - Eventual consistency for read replicas
+  - Linearizability guarantees
 
 ### Phase 3: Performance & Scale
 - [ ] **Buffer Pool Management** - Critical for database performance
@@ -56,10 +59,6 @@
   - Latch-based concurrency control
   - Lock coupling strategies
   - Read-write lock optimization
-- [ ] **Query Optimization** - Understand how databases think
-  - SQL parser implementation
-  - Cost-based optimization
-  - Join algorithm selection
 
 ### Advanced Distributed Systems Features
 - [ ] **Partition Tolerance & Split-Brain Prevention**
@@ -71,11 +70,8 @@
   - Leadership transfer mechanism
   - Configuration changes with joint consensus
 - [ ] **Consistency Models**
-  - Different isolation levels implementation
-  - Eventual consistency for read replicas
-  - Linearizability guarantees
 
-### Advanced Storage Engine Features
+### Advanced Storage Engine Features (Optional)
 - [ ] **MVCC (Multi-Version Concurrency Control)**
   - Version chain management
   - Garbage collection strategies
@@ -83,11 +79,6 @@
 - [ ] **Storage Optimizations**
   - Page-level compression
   - Bloom filters for negative lookups
-  - Secondary index support
-- [ ] **Advanced Query Processing**
-  - Join algorithms (nested loop, hash, merge)
-  - Index selection and statistics
-  - Parallel query execution
 
 ## Immediate Issues (Fix These First)
 

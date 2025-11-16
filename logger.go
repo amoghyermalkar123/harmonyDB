@@ -10,14 +10,18 @@ import (
 
 var Logger *zap.Logger
 
-func InitLogger(port int) error {
+func InitLogger(port int, test bool) error {
 	config := zap.NewProductionConfig()
-	config.Level = zap.NewAtomicLevelAt(zap.ErrorLevel)
+	config.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
 
 	// Create file output - use container-appropriate path
 	logDir := "/var/log/harmonydb"
 	if _, err := os.Stat("/opt/homebrew/var/log"); err == nil {
 		logDir = "/opt/homebrew/var/log" // Local development
+	}
+
+	if test {
+		logDir = "."
 	}
 
 	logPath := fmt.Sprintf("%s/harmony_%d.log", logDir, port)
@@ -49,8 +53,8 @@ func InitLogger(port int) error {
 
 	// Create multi-output core
 	core := zapcore.NewTee(
-		zapcore.NewCore(consoleEncoder, zapcore.AddSync(os.Stdout), zap.ErrorLevel),
-		zapcore.NewCore(fileEncoder, zapcore.AddSync(logFile), zap.ErrorLevel),
+		zapcore.NewCore(consoleEncoder, zapcore.AddSync(os.Stdout), zap.InfoLevel),
+		zapcore.NewCore(fileEncoder, zapcore.AddSync(logFile), zap.InfoLevel),
 	)
 
 	Logger = zap.New(core, zap.AddCaller(), zap.AddStacktrace(zapcore.ErrorLevel))

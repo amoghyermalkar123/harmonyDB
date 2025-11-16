@@ -1,9 +1,7 @@
 package harmonydb
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"harmonydb/raft"
 	"net/http"
@@ -24,16 +22,33 @@ type Response struct {
 	Error   string `json:"error,omitempty"`
 }
 
-type Db struct {
+type DB struct {
 	kv         *BTree
 	consensus  *raft.Raft
 	httpClient *http.Client
 }
 
-func Open(raftPort int, httpPort int) (*Db, error) {
-	db := &Db{
+func Open(raftPort int, httpPort int) (*DB, error) {
+	nodeID := int64(1)
+	clusterConfig := raft.ClusterConfig{
+		ThisNodeID: nodeID,
+		Nodes: map[int64]raft.NodeConfig{
+			nodeID: {
+				ID:       nodeID,
+				RaftPort: raftPort,
+				HTTPPort: httpPort,
+				Address:  "localhost",
+			},
+		},
+	}
+
+	return OpenWithConfig(clusterConfig)
+}
+
+func OpenWithConfig(clusterConfig raft.ClusterConfig) (*DB, error) {
+	db := &DB{
 		kv:         NewBTree(),
-		consensus:  raft.NewRaftServerWithConsul(raftPort, httpPort),
+		consensus:  raft.NewRaftServerWithConfig(clusterConfig),
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
 
@@ -42,7 +57,7 @@ func Open(raftPort int, httpPort int) (*Db, error) {
 	return db, nil
 }
 
-func (db *Db) scheduler() {
+func (db *DB) scheduler() {
 	for {
 		select {
 		// TODO: Make this channel a generic listener on the Db level
@@ -62,14 +77,10 @@ func (db *Db) scheduler() {
 	}
 }
 
-func (db *Db) Put(key, val []byte) error {
+func (db *DB) Put(key, val []byte) error {
 	GetLogger().Debug("Put", zap.String("component", "db"))
 
 	if err := db.consensus.Put(context.TODO(), key, val); err != nil {
-		if err == raft.ErrNotALeader {
-			return db.redirectPutToLeader(key, val)
-		}
-
 		return fmt.Errorf("consensus: %w", err)
 	}
 
@@ -90,53 +101,21 @@ func (db *Db) Put(key, val []byte) error {
 	return nil
 }
 
-func (db *Db) redirectPutToLeader(key, val []byte) error {
-	GetLogger().Debug("Redirecting PUT to leader", zap.String("component", "db"))
-
-	// Get leader address
-	leaderAddr, err := db.consensus.GetLeaderAddress()
-	if err != nil {
-		// Check if the error indicates this node is the leader
-		if err.Error() == "this node is the leader" {
-			return fmt.Errorf("redirect: %w", err)
-		}
-
-		return fmt.Errorf("redirect: %w", err)
-	}
-
-	// Create PUT request
-	putReq := PutRequest{
-		Key:   string(key),
-		Value: string(val),
-	}
-
-	jsonData, err := json.Marshal(putReq)
-	if err != nil {
-		return fmt.Errorf("marshal: %w", err)
-	}
-
-	// Send request to leader
-	url := fmt.Sprintf("%s/put", leaderAddr)
-
-	resp, err := db.httpClient.Post(url, "application/json", bytes.NewBuffer(jsonData))
-	if err != nil {
-		GetLogger().Warn("Failed to send PUT request to leader", zap.String("component", "db"), zap.String("leader", leaderAddr), zap.Error(err))
-		return fmt.Errorf("redirect: put: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var response Response
-	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
-		return fmt.Errorf("redirect: decode: %w", err)
-	}
-
-	return nil
-}
-
-func (db *Db) Get(key []byte) ([]byte, error) {
+func (db *DB) Get(key []byte) ([]byte, error) {
 	return db.kv.Get(key)
 }
 
-func (db *Db) GetLeaderID() int64 {
+func (db *DB) GetLeaderID() int64 {
 	return db.consensus.GetLeaderID()
+}
+
+func (db *DB) GetRaft() *raft.Raft {
+	return db.consensus
+}
+
+// Stop gracefully shuts down the database and raft server
+func (db *DB) Stop() {
+	if db.consensus != nil {
+		db.consensus.Stop()
+	}
 }

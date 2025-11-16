@@ -15,7 +15,7 @@ import (
 )
 
 type HTTPServer struct {
-	db     *harmonydb.Db
+	db     *harmonydb.DB
 	server *http.Server
 	port   int
 	mu     sync.RWMutex
@@ -53,15 +53,20 @@ func NewHTTPServerWithRaftPort(httpPort, raftPort int) *HTTPServer {
 	}
 }
 
+// NewHTTPServerWithDB creates a new HTTP server with an existing database instance
+func NewHTTPServerWithDB(db *harmonydb.DB, port int) *HTTPServer {
+	return &HTTPServer{
+		db:   db,
+		port: port,
+	}
+}
+
 func (h *HTTPServer) Start() error {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/health", h.handleHealth)
-
 	mux.HandleFunc("/put", h.handlePut)
-
 	mux.HandleFunc("/get", h.handleGet)
-
 	mux.HandleFunc("/leader", h.handleLeader)
 
 	h.server = &http.Server{
@@ -76,6 +81,12 @@ func (h *HTTPServer) Start() error {
 }
 
 func (h *HTTPServer) Stop() error {
+	// Stop the database (including Raft) first
+	if h.db != nil {
+		h.db.Stop()
+	}
+
+	// Then stop the HTTP server
 	if h.server != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

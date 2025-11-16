@@ -17,7 +17,7 @@ func main() {
 	raftPort := getRaftPortFromEnv()
 
 	// Initialize global logger
-	if err := harmonydb.InitLogger(httpPort); err != nil {
+	if err := harmonydb.InitLogger(httpPort, false); err != nil {
 		fmt.Printf("Failed to initialize logger: %v\n", err)
 		os.Exit(1)
 	}
@@ -54,13 +54,13 @@ func getPortFromEnv() int {
 func getRaftPortFromEnv() int {
 	portStr := os.Getenv("RAFT_PORT")
 	if portStr == "" {
-		portStr = "9090"
+		portStr = "9091"
 	}
 
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
-		fmt.Printf("Invalid RAFT_PORT environment variable: %s, using default 9090\n", portStr)
-		return 9090
+		fmt.Printf("Invalid RAFT_PORT environment variable: %s, using default 9091\n", portStr)
+		return 9091
 	}
 
 	return port
