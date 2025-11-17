@@ -69,7 +69,7 @@ func (db *DB) scheduler() {
 			GetLogger().Debug("Scheduler Triggered")
 
 			for _, log := range d.Entries {
-				if err := db.kv.Put([]byte(log.Data.Key), []byte(log.Data.Value)); err != nil {
+				if err := db.kv.put([]byte(log.Data.Key), []byte(log.Data.Value)); err != nil {
 					panic(fmt.Sprintf("put: should never panic: (%v)", err))
 				}
 			}
@@ -91,7 +91,7 @@ func (db *DB) Put(key, val []byte) error {
 	// we can optimize this for batched entries as well
 	for i := lastApplied; i <= lastCommitted; i++ {
 		GetLogger().Debug("Apply Log", zap.String("component", "db"), zap.Int64("lastApplied", lastApplied), zap.Int64("lastCommitted", lastCommitted))
-		if err := db.kv.Put(key, val); err != nil {
+		if err := db.kv.put(key, val); err != nil {
 			return fmt.Errorf("Put : %w", err)
 		}
 

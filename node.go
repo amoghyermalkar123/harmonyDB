@@ -182,6 +182,21 @@ func (n *Node) findInsPointForKey(key []byte) uint16 {
 	return uint16(low)
 }
 
+func (n *Node) findChildPage(key []byte) uint16 {
+	var found uint16 = 0
+
+	// TODO: return last cell file offset when `key` is greater than all
+	for _, ofs := range n.offsets {
+		if bytes.Compare(key, n.internalCell[ofs].key) > 0 {
+			found = ofs
+		} else {
+			return found
+		}
+	}
+
+	return found
+}
+
 func (n *Node) findLeafCell(key []byte) *leafCell {
 	for _, cell := range n.leafCell {
 		if bytes.Equal(cell.key, key) {

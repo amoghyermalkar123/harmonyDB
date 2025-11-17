@@ -54,7 +54,7 @@ func (b *BTree) setRootPage(pg *Node) {
 	b.root = pg
 }
 
-func (b *BTree) Put(key, val []byte) error {
+func (b *BTree) put(key, val []byte) error {
 	pg := b.getRootPage()
 
 	if pg.isLeaf {
@@ -85,7 +85,7 @@ func (b *BTree) get(next *Node, key []byte) ([]byte, error) {
 	// `next` is an internal node, we need to follow the pointer
 	// and retrieve the child page, and recursively call `get`
 	// until we find the leaf cell
-	ofs := next.findInsPointForKey(key)
+	ofs := next.findChildPage(key)
 	nextPg := b.fetch(next.internalCell[ofs].fileOffset)
 
 	return b.get(nextPg, key)
@@ -110,18 +110,25 @@ func (b *BTree) insertLeaf(parent, curr *Node, key, value []byte) error {
 
 	// let's check if the parent is nil
 	if parent == nil {
+		// we dont have a root page
+
 		// if so, this means the current leaf page acted as the root node
 		// now that we've split this leaf node, we need to add a new root ndoe
 		// which will now act as the internal node
 		parentPg := &Node{}
+		parentPg.appendInternalCell(curr.fileOffset, curr.leafCell[curr.offsets[0]].key)
 		parentPg.appendInternalCell(newpg.fileOffset, sep)
 
-		b.setRootPage(b.root)
+		b.setRootPage(parentPg)
 	} else {
 		// now we add the seperator key to the current internal node
 		// to make it reachable via our BTree
 		of := parent.findInsPointForKey(sep)
-		parent.insertInternalCell(of, newpg.fileOffset, sep)
+		if of == uint16(len(parent.offsets)) {
+			parent.appendInternalCell(newpg.fileOffset, sep)
+		} else {
+			parent.insertInternalCell(of, newpg.fileOffset, sep)
+		}
 	}
 
 	curr.markDirty()
@@ -137,8 +144,10 @@ func (b *BTree) insertInternal(parent, curr *Node, key, value []byte) error {
 	// 4. check if the internal node is full, if not return nil
 	// 5. if yes, split, add sep key to node
 
-	offset := curr.findInsPointForKey(key)
-	childpg := b.cache[int64(offset)]
+	// TODO: use a different searcher here
+	offset := curr.findChildPage(key)
+	fileOffset := curr.internalCell[offset].fileOffset
+	childpg := b.cache[int64(fileOffset)]
 
 	if childpg.isLeaf {
 		b.insertLeaf(curr, childpg, key, value)
