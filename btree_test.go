@@ -96,63 +96,62 @@ func TestBTreeSequentialInsertions(t *testing.T) {
 		}
 	})
 
-	// TODO: Fix these tests
-	// t.Run("descending order", func(t *testing.T) {
-	// 	bt := NewBTree()
+	t.Run("descending order", func(t *testing.T) {
+		bt := NewBTree()
 
-	// 	for i := 20; i > 0; i-- {
-	// 		key := []byte(fmt.Sprintf("key%03d", i))
-	// 		val := []byte(fmt.Sprintf("val%03d", i))
-	// 		err := bt.put(key, val)
-	// 		require.NoError(t, err)
-	// 	}
+		for i := 20; i > 0; i-- {
+			key := []byte(fmt.Sprintf("key%03d", i))
+			val := []byte(fmt.Sprintf("val%03d", i))
+			err := bt.put(key, val)
+			require.NoError(t, err)
+		}
 
-	// 	for i := 20; i > 0; i-- {
-	// 		key := []byte(fmt.Sprintf("key%03d", i))
-	// 		expectedVal := []byte(fmt.Sprintf("val%03d", i))
-	// 		val, err := bt.Get(key)
-	// 		if err != nil {
-	// 			t.Logf("Failed to get key %s: %v", string(key), err)
-	// 			root := bt.getRootPage()
-	// 			if !root.isLeaf {
-	// 				t.Logf("Root is internal with %d cells:", len(root.internalCell))
-	// 				for j, cell := range root.internalCell {
-	// 					t.Logf("  Cell %d: key=%s, offset=%d", j, string(cell.key), cell.fileOffset)
-	// 				}
-	// 			}
-	// 		}
-	// 		require.NoError(t, err)
-	// 		assert.Equal(t, expectedVal, val)
-	// 	}
-	// })
+		for i := 20; i > 0; i-- {
+			key := []byte(fmt.Sprintf("key%03d", i))
+			expectedVal := []byte(fmt.Sprintf("val%03d", i))
+			val, err := bt.Get(key)
+			if err != nil {
+				t.Logf("Failed to get key %s: %v", string(key), err)
+				root := bt.getRootPage()
+				if !root.isLeaf {
+					t.Logf("Root is internal with %d cells:", len(root.internalCell))
+					for j, cell := range root.internalCell {
+						t.Logf("  Cell %d: key=%s, offset=%d", j, string(cell.key), cell.fileOffset)
+					}
+				}
+			}
+			require.NoError(t, err)
+			assert.Equal(t, expectedVal, val)
+		}
+	})
 
-	// t.Run("random order", func(t *testing.T) {
-	// 	bt := NewBTree()
+	t.Run("random order", func(t *testing.T) {
+		bt := NewBTree()
 
-	// 	keys := make([]int, 20)
-	// 	for i := 0; i < 20; i++ {
-	// 		keys[i] = i
-	// 	}
+		keys := make([]int, 20)
+		for i := 0; i < 20; i++ {
+			keys[i] = i
+		}
 
-	// 	rand.Shuffle(len(keys), func(i, j int) {
-	// 		keys[i], keys[j] = keys[j], keys[i]
-	// 	})
+		rand.Shuffle(len(keys), func(i, j int) {
+			keys[i], keys[j] = keys[j], keys[i]
+		})
 
-	// 	for _, i := range keys {
-	// 		key := []byte(fmt.Sprintf("key%03d", i))
-	// 		val := []byte(fmt.Sprintf("val%03d", i))
-	// 		err := bt.put(key, val)
-	// 		require.NoError(t, err)
-	// 	}
+		for _, i := range keys {
+			key := []byte(fmt.Sprintf("key%03d", i))
+			val := []byte(fmt.Sprintf("val%03d", i))
+			err := bt.put(key, val)
+			require.NoError(t, err)
+		}
 
-	// 	for i := 0; i < 20; i++ {
-	// 		key := []byte(fmt.Sprintf("key%03d", i))
-	// 		expectedVal := []byte(fmt.Sprintf("val%03d", i))
-	// 		val, err := bt.Get(key)
-	// 		require.NoError(t, err)
-	// 		assert.Equal(t, expectedVal, val)
-	// 	}
-	// })
+		for i := 0; i < 20; i++ {
+			key := []byte(fmt.Sprintf("key%03d", i))
+			expectedVal := []byte(fmt.Sprintf("val%03d", i))
+			val, err := bt.Get(key)
+			require.NoError(t, err)
+			assert.Equal(t, expectedVal, val)
+		}
+	})
 }
 
 func TestBTreeKeyValueVariations(t *testing.T) {
