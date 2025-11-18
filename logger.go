@@ -63,6 +63,10 @@ func InitLogger(port int, test bool) error {
 }
 
 func GetLogger() *zap.Logger {
+	if Logger == nil {
+		// For tests, use a no-op logger
+		Logger = zap.NewNop()
+	}
 	return Logger
 }
 

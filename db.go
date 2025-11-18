@@ -46,8 +46,11 @@ func Open(raftPort int, httpPort int) (*DB, error) {
 }
 
 func OpenWithConfig(clusterConfig raft.ClusterConfig) (*DB, error) {
+	// Use node ID to create unique database file for each node
+	dbPath := fmt.Sprintf("harmony-%d.db", clusterConfig.ThisNodeID)
+
 	db := &DB{
-		kv:         NewBTree(),
+		kv:         NewBTreeWithPath(dbPath),
 		consensus:  raft.NewRaftServerWithConfig(clusterConfig),
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
@@ -84,19 +87,8 @@ func (db *DB) Put(key, val []byte) error {
 		return fmt.Errorf("consensus: %w", err)
 	}
 
-	lastApplied, lastCommitted := db.consensus.GetLastAppliedLastCommitted()
-
-	// apply all remaining entries since we last applied to the database
-	// TODO: this is incorrect, we are adding same key value? no? once? idk change this
-	// we can optimize this for batched entries as well
-	for i := lastApplied; i <= lastCommitted; i++ {
-		GetLogger().Debug("Apply Log", zap.String("component", "db"), zap.Int64("lastApplied", lastApplied), zap.Int64("lastCommitted", lastCommitted))
-		if err := db.kv.put(key, val); err != nil {
-			return fmt.Errorf("Put : %w", err)
-		}
-
-		db.consensus.IncrementLastApplied()
-	}
+	// The scheduler goroutine will apply committed entries from the Ready() channel
+	// No need to manually apply here - that's handled asynchronously by the scheduler
 
 	return nil
 }

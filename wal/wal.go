@@ -84,6 +84,15 @@ func (lm *LogManager) GetLogs() []*proto.Log {
 func (lm *LogManager) GetLogsAfter(index int64) []*proto.Log {
 	lm.RLock()
 	defer lm.RUnlock()
+
+	// Bounds checking to prevent panic
+	if index < 0 {
+		index = 0
+	}
+	if index >= int64(len(lm.logs)) {
+		return []*proto.Log{}
+	}
+
 	result := make([]*proto.Log, len(lm.logs[index:]))
 	copy(result, lm.logs[index:])
 	return result

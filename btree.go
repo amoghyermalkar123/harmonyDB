@@ -14,7 +14,11 @@ type BTree struct {
 }
 
 func NewBTree() *BTree {
-	f, err := newFileStore("harmony.db")
+	return NewBTreeWithPath("harmony.db")
+}
+
+func NewBTreeWithPath(dbPath string) *BTree {
+	f, err := newFileStore(dbPath)
 	if err != nil {
 		panic(fmt.Errorf("file store: %w", err))
 	}
@@ -92,6 +96,17 @@ func (b *BTree) get(next *Node, key []byte) ([]byte, error) {
 }
 
 func (b *BTree) insertLeaf(parent, curr *Node, key, value []byte) error {
+	// Check if key already exists and update it
+	existingCell := curr.findLeafCell(key)
+	if existingCell != nil {
+		// Update existing value
+		existingCell.val = value
+		existingCell.valSize = uint32(len(value))
+		curr.markDirty()
+		return nil
+	}
+
+	// Key doesn't exist, insert new cell
 	ofs := curr.findInsPointForKey(key)
 	curr.insertLeafCell(ofs, key, value)
 

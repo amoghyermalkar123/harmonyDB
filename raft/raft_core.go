@@ -127,9 +127,16 @@ func newRaftNode() *raftNode {
 
 func (n *raftNode) CommitIdx(idx int64) {
 	n.meta.Lock()
-	defer n.meta.Unlock()
-
+	oldCommitIndex := n.meta.lastCommitIndex
 	n.meta.lastCommitIndex = idx
+	n.meta.Unlock()
+
+	// Apply newly committed entries to the state machine
+	if idx > oldCommitIndex {
+		n.applyc <- ToApply{
+			Entries: n.logManager.GetLogsAfter(oldCommitIndex),
+		}
+	}
 }
 
 func generateNodeID() int64 {
