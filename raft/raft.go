@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"harmonydb/raft/proto"
 	"net"
+	"time"
 
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -40,11 +41,18 @@ func NewRaftServerWithConfig(clusterConfig ClusterConfig) *Raft {
 	// Set the node ID to match configuration
 	r.n.ID = clusterConfig.ThisNodeID
 
+	// Start Raft server first so we can receive connections
+	go r.startWithPort(thisNodeConfig.RaftPort)
+
+	// Give the server a moment to start
+	time.Sleep(100 * time.Millisecond)
+
 	// Initialize cluster connections
 	r.initializeCluster()
 
-	// Start Raft server
-	go r.startWithPort(thisNodeConfig.RaftPort)
+	// Start background reconnection to handle peers that aren't up yet
+	go r.reconnectLoop()
+
 	go r.n.startElection()
 
 	getLogger().Info("Started Raft server with static configuration",
@@ -117,6 +125,60 @@ func (r *Raft) initializeCluster() {
 	getLogger().Info("Cluster initialization complete",
 		zap.String("component", "raft"),
 		zap.Int("peer_count", len(cluster)))
+}
+
+// reconnectLoop periodically tries to connect to missing peers
+func (r *Raft) reconnectLoop() {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		r.n.Lock()
+		currentPeers := len(r.n.cluster)
+		r.n.Unlock()
+
+		expectedPeers := len(r.config.Nodes) - 1 // excluding self
+
+		if currentPeers >= expectedPeers {
+			continue // all peers connected
+		}
+
+		// Try to connect to missing peers
+		for nodeID, nodeConfig := range r.config.Nodes {
+			if nodeID == r.n.ID {
+				continue
+			}
+
+			r.n.Lock()
+			_, exists := r.n.cluster[nodeID]
+			r.n.Unlock()
+
+			if exists {
+				continue
+			}
+
+			// Try to connect
+			address := fmt.Sprintf("%s:%d", nodeConfig.Address, nodeConfig.RaftPort)
+			conn, err := grpc.Dial(address, grpc.WithInsecure(), grpc.WithBlock(), grpc.WithTimeout(500*time.Millisecond))
+			if err != nil {
+				continue // peer not ready yet
+			}
+
+			client := proto.NewRaftClient(conn)
+
+			r.n.Lock()
+			r.n.cluster[nodeID] = client
+			if r.n.nextIndex[nodeID] == 0 {
+				r.n.nextIndex[nodeID] = 1
+			}
+			r.n.Unlock()
+
+			getLogger().Info("Connected to peer (reconnect)",
+				zap.String("component", "raft"),
+				zap.Int64("peer_id", nodeID),
+				zap.String("address", address))
+		}
+	}
 }
 
 func (r *Raft) startWithPort(port int) {

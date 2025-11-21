@@ -3,10 +3,12 @@ package harmonydb
 import (
 	"context"
 	"fmt"
+	"harmonydb/metrics"
 	"harmonydb/raft"
 	"net/http"
 	"time"
 
+	"go.opentelemetry.io/otel/codes"
 	"go.uber.org/zap"
 )
 
@@ -81,9 +83,15 @@ func (db *DB) scheduler() {
 }
 
 func (db *DB) Put(key, val []byte) error {
+	ctx, span := metrics.StartSpan(context.TODO(), "db.put")
+	defer span.End()
+
+	span.SetAttributes(metrics.KeyAttr(string(key)))
 	GetLogger().Debug("Put", zap.String("component", "db"))
 
-	if err := db.consensus.Put(context.TODO(), key, val); err != nil {
+	if err := db.consensus.Put(ctx, key, val); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("consensus: %w", err)
 	}
 
@@ -94,7 +102,19 @@ func (db *DB) Put(key, val []byte) error {
 }
 
 func (db *DB) Get(key []byte) ([]byte, error) {
-	return db.kv.Get(key)
+	_, span := metrics.StartSpan(context.TODO(), "db.get")
+	defer span.End()
+
+	span.SetAttributes(metrics.KeyAttr(string(key)))
+
+	val, err := db.kv.Get(key)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+
+	return val, nil
 }
 
 func (db *DB) GetLeaderID() int64 {
@@ -103,6 +123,16 @@ func (db *DB) GetLeaderID() int64 {
 
 func (db *DB) GetRaft() *raft.Raft {
 	return db.consensus
+}
+
+// Raft returns the Raft consensus instance for debug visualization
+func (db *DB) Raft() *raft.Raft {
+	return db.consensus
+}
+
+// BTree returns the B+Tree storage instance for debug visualization
+func (db *DB) BTree() *BTree {
+	return db.kv
 }
 
 // Stop gracefully shuts down the database and raft server

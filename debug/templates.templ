@@ -1,0 +1,397 @@
+package debug
+
+import (
+	"fmt"
+	"harmonydb/raft"
+	"harmonydb"
+)
+
+templ Layout(title string) {
+	<!DOCTYPE html>
+	<html lang="en">
+		<head>
+			<meta charset="UTF-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+			<title>{ title } - HarmonyDB Debug</title>
+			<script src="https://unpkg.com/htmx.org@1.9.10"></script>
+			<script src="https://unpkg.com/htmx.org/dist/ext/sse.js"></script>
+			<script src="https://cdn.tailwindcss.com"></script>
+			<style>
+				.badge-leader { @apply bg-green-100 text-green-800 px-2 py-1 rounded text-sm font-medium; }
+				.badge-follower { @apply bg-blue-100 text-blue-800 px-2 py-1 rounded text-sm font-medium; }
+				.badge-candidate { @apply bg-yellow-100 text-yellow-800 px-2 py-1 rounded text-sm font-medium; }
+				.badge-committed { @apply bg-green-100 text-green-800 px-2 py-1 rounded text-xs; }
+				.badge-pending { @apply bg-gray-100 text-gray-600 px-2 py-1 rounded text-xs; }
+				.badge-leaf { @apply bg-emerald-100 text-emerald-800 px-2 py-1 rounded text-xs; }
+				.badge-internal { @apply bg-purple-100 text-purple-800 px-2 py-1 rounded text-xs; }
+			</style>
+		</head>
+		<body class="bg-gray-50 min-h-screen">
+			<nav class="bg-white shadow-sm border-b">
+				<div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+					<div class="flex justify-between h-16">
+						<div class="flex">
+							<div class="flex-shrink-0 flex items-center">
+								<span class="text-xl font-bold text-gray-900">HarmonyDB Debug</span>
+							</div>
+							<div class="hidden sm:ml-6 sm:flex sm:space-x-8">
+								<a href="/" class="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium">
+									Dashboard
+								</a>
+								<a href="/raft" class="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium">
+									Raft
+								</a>
+								<a href="/btree" class="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium">
+									B+Tree
+								</a>
+							</div>
+						</div>
+					</div>
+				</div>
+			</nav>
+			<main class="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
+				{ children... }
+			</main>
+		</body>
+	</html>
+}
+
+templ Dashboard() {
+	@Layout("Dashboard") {
+		<div class="px-4 py-6 sm:px-0">
+			<div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+				<a href="/raft" class="block p-6 bg-white rounded-lg border border-gray-200 shadow-md hover:bg-gray-100">
+					<h5 class="mb-2 text-2xl font-bold tracking-tight text-gray-900">Raft Consensus</h5>
+					<p class="font-normal text-gray-700">View cluster state, log entries, leader state, and replication progress.</p>
+				</a>
+				<a href="/btree" class="block p-6 bg-white rounded-lg border border-gray-200 shadow-md hover:bg-gray-100">
+					<h5 class="mb-2 text-2xl font-bold tracking-tight text-gray-900">B+Tree Storage</h5>
+					<p class="font-normal text-gray-700">Explore tree structure, node details, and storage statistics.</p>
+				</a>
+			</div>
+		</div>
+	}
+}
+
+templ RaftPage(state *raft.DebugClusterState) {
+	@Layout("Raft Cluster") {
+		<div hx-ext="sse" sse-connect="/sse/raft" sse-swap="innerHTML" hx-target="#raft-content">
+			<div class="mb-4">
+				<div class="sm:hidden">
+					<select id="tabs" class="block w-full rounded-md border-gray-300 focus:border-indigo-500 focus:ring-indigo-500">
+						<option>Cluster Overview</option>
+						<option>Log Comparison</option>
+						<option>Leader State</option>
+					</select>
+				</div>
+				<div class="hidden sm:block">
+					<nav class="flex space-x-4" aria-label="Tabs">
+						<button onclick="showTab('cluster')" class="tab-btn bg-indigo-100 text-indigo-700 px-3 py-2 font-medium text-sm rounded-md" id="tab-cluster">
+							Cluster Overview
+						</button>
+						<button onclick="showTab('logs')" class="tab-btn text-gray-500 hover:text-gray-700 px-3 py-2 font-medium text-sm rounded-md" id="tab-logs">
+							Log Comparison
+						</button>
+						<button onclick="showTab('leader')" class="tab-btn text-gray-500 hover:text-gray-700 px-3 py-2 font-medium text-sm rounded-md" id="tab-leader">
+							Leader State
+						</button>
+					</nav>
+				</div>
+			</div>
+			<div id="raft-content">
+				@RaftContent(state)
+			</div>
+		</div>
+		<script>
+			let currentTab = 'cluster';
+			function showTab(tab) {
+				currentTab = tab;
+				document.querySelectorAll('.tab-btn').forEach(btn => {
+					btn.classList.remove('bg-indigo-100', 'text-indigo-700');
+					btn.classList.add('text-gray-500');
+				});
+				document.getElementById('tab-' + tab).classList.add('bg-indigo-100', 'text-indigo-700');
+				document.getElementById('tab-' + tab).classList.remove('text-gray-500');
+
+				document.querySelectorAll('.tab-content').forEach(content => {
+					content.classList.add('hidden');
+				});
+				document.getElementById('content-' + tab).classList.remove('hidden');
+			}
+		</script>
+	}
+}
+
+templ RaftContent(state *raft.DebugClusterState) {
+	<div id="content-cluster" class="tab-content">
+		@ClusterOverview(state)
+	</div>
+	<div id="content-logs" class="tab-content hidden">
+		@LogComparison(state)
+	</div>
+	<div id="content-leader" class="tab-content hidden">
+		@LeaderState(state)
+	</div>
+}
+
+templ ClusterOverview(state *raft.DebugClusterState) {
+	<div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+		for _, node := range state.Nodes {
+			@NodeCard(node)
+		}
+	</div>
+}
+
+templ NodeCard(node *raft.DebugNodeState) {
+	<div class="bg-white overflow-hidden shadow rounded-lg">
+		<div class="px-4 py-5 sm:p-6">
+			<div class="flex items-center justify-between mb-4">
+				<h3 class="text-lg font-medium text-gray-900">
+					Node { fmt.Sprintf("%d", node.NodeID) }
+				</h3>
+				@RoleBadge(node.Role)
+			</div>
+			<dl class="grid grid-cols-2 gap-4">
+				<div>
+					<dt class="text-sm font-medium text-gray-500">Term</dt>
+					<dd class="text-lg font-semibold text-gray-900">{ fmt.Sprintf("%d", node.Term) }</dd>
+				</div>
+				<div>
+					<dt class="text-sm font-medium text-gray-500">Commit Index</dt>
+					<dd class="text-lg font-semibold text-gray-900">{ fmt.Sprintf("%d", node.CommitIndex) }</dd>
+				</div>
+				<div>
+					<dt class="text-sm font-medium text-gray-500">Last Applied</dt>
+					<dd class="text-lg font-semibold text-gray-900">{ fmt.Sprintf("%d", node.LastApplied) }</dd>
+				</div>
+				<div>
+					<dt class="text-sm font-medium text-gray-500">Log Entries</dt>
+					<dd class="text-lg font-semibold text-gray-900">{ fmt.Sprintf("%d", len(node.LogEntries)) }</dd>
+				</div>
+			</dl>
+		</div>
+	</div>
+}
+
+templ RoleBadge(role string) {
+	if role == "leader" {
+		<span class="badge-leader">Leader</span>
+	} else if role == "candidate" {
+		<span class="badge-candidate">Candidate</span>
+	} else {
+		<span class="badge-follower">Follower</span>
+	}
+}
+
+templ LogComparison(state *raft.DebugClusterState) {
+	<div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+		for _, node := range state.Nodes {
+			<div class="bg-white overflow-hidden shadow rounded-lg">
+				<div class="px-4 py-5 sm:p-6">
+					<h3 class="text-lg font-medium text-gray-900 mb-4">
+						Node { fmt.Sprintf("%d", node.NodeID) }
+					</h3>
+					@LogTable(node.LogEntries, node.CommitIndex)
+				</div>
+			</div>
+		}
+	</div>
+}
+
+templ LogTable(entries []raft.DebugLogEntry, commitIndex int64) {
+	<div class="overflow-x-auto">
+		<table class="min-w-full divide-y divide-gray-200">
+			<thead class="bg-gray-50">
+				<tr>
+					<th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">ID</th>
+					<th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Term</th>
+					<th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Key</th>
+					<th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+				</tr>
+			</thead>
+			<tbody class="bg-white divide-y divide-gray-200">
+				for _, entry := range entries {
+					<tr>
+						<td class="px-3 py-2 whitespace-nowrap text-sm text-gray-900">{ fmt.Sprintf("%d", entry.ID) }</td>
+						<td class="px-3 py-2 whitespace-nowrap text-sm text-gray-500">{ fmt.Sprintf("%d", entry.Term) }</td>
+						<td class="px-3 py-2 whitespace-nowrap text-sm text-gray-500">{ entry.Key }</td>
+						<td class="px-3 py-2 whitespace-nowrap">
+							if entry.Committed {
+								<span class="badge-committed">Committed</span>
+							} else {
+								<span class="badge-pending">Pending</span>
+							}
+						</td>
+					</tr>
+				}
+				if len(entries) == 0 {
+					<tr>
+						<td colspan="4" class="px-3 py-4 text-center text-sm text-gray-500">No log entries</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+	</div>
+}
+
+templ LeaderState(state *raft.DebugClusterState) {
+	for _, node := range state.Nodes {
+		if node.Role == "leader" {
+			<div class="bg-white overflow-hidden shadow rounded-lg">
+				<div class="px-4 py-5 sm:p-6">
+					<h3 class="text-lg font-medium text-gray-900 mb-4">Leader Replication State</h3>
+					<div class="space-y-4">
+						for peerID, nextIdx := range node.NextIndex {
+							<div class="space-y-1">
+								<div class="flex justify-between text-sm">
+									<span class="font-medium">Node { fmt.Sprintf("%d", peerID) }</span>
+									<span class="text-gray-500">
+										Next: { fmt.Sprintf("%d", nextIdx) } / Match: { fmt.Sprintf("%d", node.MatchIndex[peerID]) }
+									</span>
+								</div>
+								<div class="w-full bg-gray-200 rounded-full h-2">
+									if len(node.LogEntries) > 0 {
+										<div class="bg-green-600 h-2 rounded-full" style={ fmt.Sprintf("width: %d%%", int(float64(node.MatchIndex[peerID])/float64(len(node.LogEntries))*100)) }></div>
+									} else {
+										<div class="bg-green-600 h-2 rounded-full" style="width: 100%"></div>
+									}
+								</div>
+							</div>
+						}
+						if len(node.NextIndex) == 0 {
+							<p class="text-sm text-gray-500">No followers connected</p>
+						}
+					</div>
+				</div>
+			</div>
+		}
+	}
+	if state.LeaderID == 0 {
+		<div class="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+			<p class="text-yellow-800">No leader elected yet</p>
+		</div>
+	}
+}
+
+templ BTreePage(state *harmonydb.DebugBTreeState) {
+	@Layout("B+Tree") {
+		<div hx-ext="sse" sse-connect="/sse/btree" sse-swap="innerHTML" hx-target="#btree-content">
+			<div id="btree-content">
+				@BTreeContent(state)
+			</div>
+		</div>
+	}
+}
+
+templ BTreeContent(state *harmonydb.DebugBTreeState) {
+	<div class="grid grid-cols-1 lg:grid-cols-4 gap-4">
+		<div class="lg:col-span-1">
+			@BTreeStats(state)
+		</div>
+		<div class="lg:col-span-3">
+			<div class="bg-white overflow-hidden shadow rounded-lg">
+				<div class="px-4 py-5 sm:p-6">
+					<h3 class="text-lg font-medium text-gray-900 mb-4">Tree Structure</h3>
+					@TreeNodeView(state.RootNode, 0)
+				</div>
+			</div>
+		</div>
+	</div>
+}
+
+templ BTreeStats(state *harmonydb.DebugBTreeState) {
+	<div class="bg-white overflow-hidden shadow rounded-lg">
+		<div class="px-4 py-5 sm:p-6">
+			<h3 class="text-lg font-medium text-gray-900 mb-4">Statistics</h3>
+			<dl class="space-y-4">
+				<div>
+					<dt class="text-sm font-medium text-gray-500">Total Pages</dt>
+					<dd class="text-2xl font-bold text-gray-900">{ fmt.Sprintf("%d", state.TotalPages) }</dd>
+				</div>
+				<div>
+					<dt class="text-sm font-medium text-gray-500">Tree Height</dt>
+					<dd class="text-2xl font-bold text-gray-900">{ fmt.Sprintf("%d", state.TreeHeight) }</dd>
+				</div>
+				<div>
+					<dt class="text-sm font-medium text-gray-500">Total Keys</dt>
+					<dd class="text-2xl font-bold text-gray-900">{ fmt.Sprintf("%d", state.TotalKeys) }</dd>
+				</div>
+			</dl>
+		</div>
+	</div>
+}
+
+templ TreeNodeView(node *harmonydb.DebugNodeViz, depth int) {
+	if node != nil {
+		<details class="mb-2" open?={ depth < 2 }>
+			<summary class="cursor-pointer p-2 bg-gray-50 rounded hover:bg-gray-100">
+				<div class="inline-flex items-center space-x-2">
+					if node.IsLeaf {
+						<span class="badge-leaf">Leaf</span>
+					} else {
+						<span class="badge-internal">Internal</span>
+					}
+					<span class="text-sm text-gray-600">
+						Offset: { fmt.Sprintf("%d", node.FileOffset) }
+					</span>
+					<span class="text-sm text-gray-600">
+						Keys: { fmt.Sprintf("%d", node.KeyCount) }
+					</span>
+					<div class="w-20 bg-gray-200 rounded-full h-1.5 inline-block">
+						<div class={ fmt.Sprintf("h-1.5 rounded-full %s", utilizationColor(node.Utilization)) } style={ fmt.Sprintf("width: %d%%", int(node.Utilization)) }></div>
+					</div>
+					<span class="text-xs text-gray-500">{ fmt.Sprintf("%.0f%%", node.Utilization) }</span>
+				</div>
+			</summary>
+			<div class="ml-4 mt-2 pl-4 border-l-2 border-gray-200">
+				@NodeDetails(node)
+				if !node.IsLeaf && len(node.Children) > 0 {
+					<div class="mt-2">
+						for _, child := range node.Children {
+							@TreeNodeView(child, depth+1)
+						}
+					</div>
+				}
+			</div>
+		</details>
+	}
+}
+
+func utilizationColor(util float64) string {
+	if util < 50 {
+		return "bg-green-500"
+	} else if util < 80 {
+		return "bg-yellow-500"
+	}
+	return "bg-red-500"
+}
+
+templ NodeDetails(node *harmonydb.DebugNodeViz) {
+	if node.IsLeaf {
+		<table class="min-w-full divide-y divide-gray-200 text-sm">
+			<thead class="bg-gray-50">
+				<tr>
+					<th class="px-2 py-1 text-left text-xs font-medium text-gray-500">Key</th>
+					<th class="px-2 py-1 text-left text-xs font-medium text-gray-500">Value</th>
+				</tr>
+			</thead>
+			<tbody class="bg-white divide-y divide-gray-200">
+				for i, key := range node.Keys {
+					<tr>
+						<td class="px-2 py-1 text-gray-900">{ key }</td>
+						<td class="px-2 py-1 text-gray-500">{ node.Values[i] }</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+	} else {
+		<div class="text-sm">
+			<span class="font-medium text-gray-700">Separator Keys: </span>
+			<div class="flex flex-wrap gap-1 mt-1">
+				for _, key := range node.Keys {
+					<span class="px-2 py-0.5 bg-gray-100 text-gray-700 rounded text-xs">{ key }</span>
+				}
+			</div>
+		</div>
+	}
+}

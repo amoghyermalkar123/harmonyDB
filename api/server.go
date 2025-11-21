@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"harmonydb"
+	"harmonydb/metrics"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 )
 
@@ -37,6 +40,24 @@ type Response struct {
 	Error   string `json:"error,omitempty"`
 }
 
+type HealthResponse struct {
+	Status  string      `json:"status"`
+	Raft    RaftHealth  `json:"raft"`
+	Storage StorageHealth `json:"storage"`
+}
+
+type RaftHealth struct {
+	State       string `json:"state"`
+	Term        int64  `json:"term"`
+	CommitIndex int64  `json:"commit_index"`
+	LeaderID    int64  `json:"leader_id"`
+}
+
+type StorageHealth struct {
+	TotalPages int `json:"total_pages"`
+}
+
+
 func NewHTTPServer(port int) *HTTPServer {
 	return NewHTTPServerWithRaftPort(port, port+1010)
 }
@@ -61,13 +82,49 @@ func NewHTTPServerWithDB(db *harmonydb.DB, port int) *HTTPServer {
 	}
 }
 
+// metricsMiddleware wraps handlers with metrics collection
+func (h *HTTPServer) metricsMiddleware(endpoint string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		startTime := time.Now()
+		metrics.HTTPInflightRequests.Inc()
+		defer metrics.HTTPInflightRequests.Dec()
+
+		// Wrap response writer to capture status code
+		wrapped := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+
+		next(wrapped, r)
+
+		duration := time.Since(startTime).Seconds()
+		status := strconv.Itoa(wrapped.statusCode)
+
+		metrics.HTTPRequestsTotal.WithLabelValues(r.Method, endpoint, status).Inc()
+		metrics.HTTPRequestDuration.WithLabelValues(r.Method, endpoint).Observe(duration)
+
+		if r.ContentLength > 0 {
+			metrics.HTTPRequestSizeBytes.WithLabelValues(r.Method, endpoint).Observe(float64(r.ContentLength))
+		}
+	}
+}
+
+// responseWriter wraps http.ResponseWriter to capture status code
+type responseWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (rw *responseWriter) WriteHeader(code int) {
+	rw.statusCode = code
+	rw.ResponseWriter.WriteHeader(code)
+}
+
 func (h *HTTPServer) Start() error {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/health", h.handleHealth)
-	mux.HandleFunc("/put", h.handlePut)
-	mux.HandleFunc("/get", h.handleGet)
-	mux.HandleFunc("/leader", h.handleLeader)
+	mux.HandleFunc("/health", h.metricsMiddleware("/health", h.handleHealth))
+	mux.HandleFunc("/put", h.metricsMiddleware("/put", h.handlePut))
+	mux.HandleFunc("/get", h.metricsMiddleware("/get", h.handleGet))
+	mux.HandleFunc("/leader", h.metricsMiddleware("/leader", h.handleLeader))
+	mux.Handle("/metrics", promhttp.Handler())
 
 	h.server = &http.Server{
 		Addr:         fmt.Sprintf(":%d", h.port),
@@ -102,7 +159,41 @@ func (h *HTTPServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	response := Response{Success: true, Message: "healthy"}
+
+	raft := h.db.GetRaft()
+	leaderID := raft.GetLeaderID()
+	term := raft.GetTerm()
+	commitIndex := raft.GetCommitIndex()
+
+	// Determine state string
+	var stateStr string
+	if leaderID == 0 {
+		stateStr = "no_leader"
+	} else if leaderID == raft.GetConfig().ThisNodeID {
+		stateStr = "leader"
+	} else {
+		stateStr = "follower"
+	}
+
+	// Determine overall health status
+	status := "healthy"
+	if leaderID == 0 {
+		status = "degraded"
+	}
+
+	response := HealthResponse{
+		Status: status,
+		Raft: RaftHealth{
+			State:       stateStr,
+			Term:        term,
+			CommitIndex: commitIndex,
+			LeaderID:    leaderID,
+		},
+		Storage: StorageHealth{
+			TotalPages: 0, // TODO: expose from BTree
+		},
+	}
+
 	json.NewEncoder(w).Encode(response)
 }
 

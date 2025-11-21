@@ -7,6 +7,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"harmonydb/metrics"
 )
 
 type fileStore struct {
@@ -52,9 +54,11 @@ func (f *fileStore) getRoot(node *Node) {
 }
 
 func (f *fileStore) flushPages() error {
+	startTime := time.Now()
 	f.lock.Lock()
 	defer f.lock.Unlock()
 
+	pagesFlushed := 0
 	for _, page := range f.cache {
 		if !page.isDirty {
 			continue
@@ -65,9 +69,25 @@ func (f *fileStore) flushPages() error {
 		}
 
 		page.markClean()
+		pagesFlushed++
 	}
 
 	f.save()
+
+	// Record metrics
+	if pagesFlushed > 0 {
+		metrics.StorageFlushDuration.Observe(time.Since(startTime).Seconds())
+		metrics.StorageFlushPagesTotal.Add(float64(pagesFlushed))
+	}
+
+	// Update dirty pages gauge
+	dirtyCount := 0
+	for _, page := range f.cache {
+		if page.isDirty {
+			dirtyCount++
+		}
+	}
+	metrics.BTreeDirtyPages.Set(float64(dirtyCount))
 
 	return nil
 }
@@ -81,6 +101,9 @@ func (f *fileStore) update(node *Node) error {
 	if _, err := f.file.WriteAt(buf, int64(node.fileOffset)); err != nil {
 		return fmt.Errorf("write: %w", err)
 	}
+
+	// Track bytes written
+	metrics.StorageWriteBytesTotal.Add(float64(len(buf)))
 
 	f.cache[int64(node.fileOffset)] = node
 

@@ -3,6 +3,9 @@ package harmonydb
 import (
 	"errors"
 	"fmt"
+	"time"
+
+	"harmonydb/metrics"
 )
 
 type BTree struct {
@@ -43,6 +46,10 @@ func (b *BTree) add(pg *Node) {
 	pg.setFileOffsetForNode(b.nextFreeOffset)
 	b.cache[int64(pg.fileOffset)] = pg
 	b.nextFreeOffset += pageSize
+
+	// Update metrics
+	metrics.BTreeTotalPages.Inc()
+	metrics.BTreeCacheSizeBytes.Add(float64(pageSize))
 }
 
 func (b *BTree) fetch(fo uint64) *Node {
@@ -59,6 +66,12 @@ func (b *BTree) setRootPage(pg *Node) {
 }
 
 func (b *BTree) put(key, val []byte) error {
+	startTime := time.Now()
+	defer func() {
+		metrics.BTreeOperationDuration.WithLabelValues("put").Observe(time.Since(startTime).Seconds())
+		metrics.BTreeOperationsTotal.WithLabelValues("put").Inc()
+	}()
+
 	pg := b.getRootPage()
 
 	if pg.isLeaf {
@@ -69,6 +82,12 @@ func (b *BTree) put(key, val []byte) error {
 }
 
 func (b *BTree) Get(key []byte) ([]byte, error) {
+	startTime := time.Now()
+	defer func() {
+		metrics.BTreeOperationDuration.WithLabelValues("get").Observe(time.Since(startTime).Seconds())
+		metrics.BTreeOperationsTotal.WithLabelValues("get").Inc()
+	}()
+
 	return b.get(b.getRootPage(), key)
 }
 
@@ -122,6 +141,9 @@ func (b *BTree) insertLeaf(parent, curr *Node, key, value []byte) error {
 	// once data is copied to new node, then make it addressable
 	// and add this page to our page store
 	b.add(newpg)
+
+	// Record split metric
+	metrics.BTreeSplitsTotal.WithLabelValues("leaf").Inc()
 
 	// let's check if the parent is nil
 	if parent == nil {
@@ -179,8 +201,117 @@ func (b *BTree) insertInternal(parent, curr *Node, key, value []byte) error {
 	sep := curr.split(newpg)
 	b.add(newpg)
 
+	// Record split metric
+	metrics.BTreeSplitsTotal.WithLabelValues("internal").Inc()
+
 	of := newpg.findInsPointForKey(sep)
 	newpg.insertInternalCell(of, newpg.fileOffset, sep)
 
 	return nil
+}
+
+// GetDebugState returns the current tree structure for visualization
+func (b *BTree) GetDebugState() *DebugBTreeState {
+	return &DebugBTreeState{
+		TotalPages: len(b.cache),
+		TreeHeight: b.calculateHeight(),
+		TotalKeys:  b.countKeys(),
+		RootNode:   b.nodeToViz(b.root),
+		Timestamp:  time.Now(),
+	}
+}
+
+// nodeToViz recursively converts a node to visualization format
+func (b *BTree) nodeToViz(n *Node) *DebugNodeViz {
+	if n == nil {
+		return nil
+	}
+
+	viz := &DebugNodeViz{
+		FileOffset: n.fileOffset,
+		IsLeaf:     n.isLeaf,
+		IsDirty:    n.isDirty,
+		KeyCount:   len(n.offsets),
+	}
+
+	if n.isLeaf {
+		viz.Utilization = float64(len(n.offsets)) / float64(maxLeafNodeCells) * 100
+		viz.Keys = make([]string, len(n.offsets))
+		viz.Values = make([]string, len(n.offsets))
+		for i, ofs := range n.offsets {
+			viz.Keys[i] = string(n.leafCell[ofs].key)
+			// Truncate values for display
+			val := string(n.leafCell[ofs].val)
+			if len(val) > 20 {
+				val = val[:20] + "..."
+			}
+			viz.Values[i] = val
+		}
+	} else {
+		viz.Utilization = float64(len(n.offsets)) / float64(maxInternalNodeCells) * 100
+		viz.Keys = make([]string, len(n.offsets))
+		viz.Children = make([]*DebugNodeViz, len(n.offsets))
+		for i, ofs := range n.offsets {
+			viz.Keys[i] = string(n.internalCell[ofs].key)
+			childNode := b.fetch(n.internalCell[ofs].fileOffset)
+			viz.Children[i] = b.nodeToViz(childNode)
+		}
+	}
+
+	return viz
+}
+
+// calculateHeight returns the tree height
+func (b *BTree) calculateHeight() int {
+	height := 0
+	node := b.root
+	for node != nil && !node.isLeaf {
+		height++
+		if len(node.offsets) > 0 {
+			node = b.fetch(node.internalCell[node.offsets[0]].fileOffset)
+		} else {
+			break
+		}
+	}
+	return height + 1 // Include leaf level
+}
+
+// countKeys returns total number of keys in the tree
+func (b *BTree) countKeys() int {
+	return b.countKeysInNode(b.root)
+}
+
+func (b *BTree) countKeysInNode(n *Node) int {
+	if n == nil {
+		return 0
+	}
+	if n.isLeaf {
+		return len(n.offsets)
+	}
+	count := 0
+	for _, ofs := range n.offsets {
+		child := b.fetch(n.internalCell[ofs].fileOffset)
+		count += b.countKeysInNode(child)
+	}
+	return count
+}
+
+// Debug state types for visualization
+type DebugBTreeState struct {
+	TotalPages int           `json:"total_pages"`
+	TreeHeight int           `json:"tree_height"`
+	TotalKeys  int           `json:"total_keys"`
+	RootNode   *DebugNodeViz `json:"root"`
+	Timestamp  time.Time     `json:"timestamp"`
+}
+
+type DebugNodeViz struct {
+	FileOffset  uint64          `json:"file_offset"`
+	IsLeaf      bool            `json:"is_leaf"`
+	IsDirty     bool            `json:"is_dirty"`
+	KeyCount    int             `json:"key_count"`
+	Keys        []string        `json:"keys"`
+	Children    []*DebugNodeViz `json:"children,omitempty"`
+	Values      []string        `json:"values,omitempty"`
+	Utilization float64         `json:"utilization"`
 }
