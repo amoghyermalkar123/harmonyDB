@@ -100,6 +100,7 @@ type raftNode struct {
 	leaderID        int64
 	matchIndex      map[int64]int64
 	nextIndex       map[int64]int64
+	shutdownOnce    sync.Once
 	sync.RWMutex
 }
 
@@ -168,7 +169,10 @@ func (n *raftNode) AppendEntriesRPC(ctx context.Context, in *proto.AppendEntries
 			}
 		}
 
-		return nil, nil
+		return &proto.AppendEntriesResponse{
+			Success:     true,
+			CurrentTerm: n.state.currentTerm,
+		}, nil
 	}
 
 	getLogger().Info("Starting AppendEntries RPC", zap.String("component", "raft"), zap.Int64("sender", in.LeaderId), zap.String("key", string(in.Entries[0].Data.Key)), zap.String("value", string(in.Entries[0].Data.Value)))
@@ -412,9 +416,12 @@ func (n *raftNode) sendAppendEntries(peers []int64) ([]int64, error) {
 			}
 
 			if resp.Success {
-				n.matchIndex[peer] += 1
-				n.nextIndex[peer] += 2
-				getLogger().Info("Successful RPC, advancing match and next indexes", zap.String("component", "raft"))
+				// Update matchIndex to the last log we sent
+				// Update nextIndex to one past the last log we sent
+				lastLogSent := n.logManager.GetLastLogID()
+				n.matchIndex[peer] = lastLogSent
+				n.nextIndex[peer] = lastLogSent + 1
+				getLogger().Info("Successful RPC, advancing match and next indexes", zap.String("component", "raft"), zap.Int64("peer", peer), zap.Int64("matchIndex", n.matchIndex[peer]), zap.Int64("nextIndex", n.nextIndex[peer]))
 			}
 
 		}
@@ -438,7 +445,16 @@ func (n *raftNode) startElection() {
 	for {
 		select {
 		case <-electionTimeOut.C:
-			if n.meta.nt == Leader || len(n.cluster) < 2 {
+			// If already a leader, just reset timeout
+			if n.meta.nt == Leader {
+				newTimeout := time.Duration(150+r.Intn(150)) * time.Millisecond
+				electionTimeOut.Reset(newTimeout)
+				continue
+			}
+
+			// Skip election if cluster too small (minimum 3 nodes required)
+			// Single-node and two-node clusters are not supported
+			if len(n.cluster) < 2 {
 				newTimeout := time.Duration(150+r.Intn(150)) * time.Millisecond
 				electionTimeOut.Reset(newTimeout)
 				continue
@@ -457,7 +473,12 @@ func (n *raftNode) startElection() {
 			n.state.pastVotes[n.state.currentTerm] = n.ID
 			n.state.Unlock()
 
-			// transition to candiadte
+			// Transition to candidate
+			n.meta.Lock()
+			n.meta.nt = Candidate
+			n.meta.Unlock()
+			getLogger().Info("Node became candidate", zap.String("component", "raft"), zap.Int64("node_id", n.ID), zap.Int64("term", n.state.currentTerm))
+
 			// start election
 			votes := 1
 			for _, node := range n.cluster {
@@ -489,26 +510,71 @@ func (n *raftNode) startElection() {
 				n.leaderID = n.ID
 				n.Unlock()
 
+				// Initialize nextIndex and matchIndex for all peers
+				// According to Raft paper, when a server becomes leader:
+				// - nextIndex[] initialized to last log index + 1
+				// - matchIndex[] initialized to 0
+				lastLogID := n.logManager.GetLastLogID()
+				for peerID := range n.cluster {
+					n.nextIndex[peerID] = lastLogID + 1
+					n.matchIndex[peerID] = 0
+				}
+
 				n.heartbeatCloser = make(chan struct{})
 
 				go n.sendHeartbeats()
+				getLogger().Info("Node became leader", zap.String("component", "raft"), zap.Int64("node_id", n.ID), zap.Int64("term", n.state.currentTerm), zap.Int("votes", votes))
+			} else {
+				// Failed to get majority - stay as candidate and will retry on next timeout
+				getLogger().Info("Node failed election, will retry", zap.String("component", "raft"), zap.Int64("node_id", n.ID), zap.Int64("term", n.state.currentTerm), zap.Int("votes", votes), zap.Int("needed", len(n.cluster)/2+1))
 			}
 		case entry := <-n.heartbeats:
 			// TODO: apply comitted entries
-			if n.meta.nt == Leader && entry.Term > n.state.currentTerm {
-				// stop sending heartbeats
-				close(n.heartbeatCloser)
 
-				n.meta.Lock()
-				n.meta.nt = Follower
-				getLogger().Warn("Node transitioned back to follower after failed election", zap.String("component", "raft"), zap.Int64("node_id", n.ID))
-				n.meta.Unlock()
+			n.state.Lock()
+			currentTerm := n.state.currentTerm
+			n.state.Unlock()
+
+			// If heartbeat is from an old term, ignore it
+			if entry.Term < currentTerm {
+				getLogger().Debug("Ignoring heartbeat from old term",
+					zap.String("component", "raft"),
+					zap.Int64("node_id", n.ID),
+					zap.Int64("current_term", currentTerm),
+					zap.Int64("heartbeat_term", entry.Term))
+				continue
 			}
 
-			// stay as a follower or a candidate because
-			// the leader is sending us the heartbeats
-			// resetting the election timeout to represent
-			// up-to-date ness
+			// Update our term if the leader's term is higher
+			if entry.Term > currentTerm {
+				n.state.Lock()
+				n.state.currentTerm = entry.Term
+				n.state.Unlock()
+			}
+
+			// If we're a leader or candidate, step down to follower
+			n.meta.Lock()
+			wasLeader := n.meta.nt == Leader
+			if n.meta.nt != Follower {
+				n.meta.nt = Follower
+				getLogger().Info("Node transitioned to follower after receiving heartbeat",
+					zap.String("component", "raft"),
+					zap.Int64("node_id", n.ID),
+					zap.Int64("leader_id", entry.LeaderId),
+					zap.Int64("term", entry.Term))
+			}
+			n.meta.Unlock()
+
+			// If we were a leader, stop sending heartbeats
+			if wasLeader && n.heartbeatCloser != nil {
+				select {
+				case <-n.heartbeatCloser:
+				default:
+					close(n.heartbeatCloser)
+				}
+			}
+
+			// Reset election timeout since we heard from a valid leader
 			newTimeout := time.Duration(150+r.Intn(150)) * time.Millisecond
 			electionTimeOut.Reset(newTimeout)
 			getLogger().Debug("Node received leader heartbeat", zap.String("component", "raft"), zap.Int64("node_id", n.ID), zap.Int64("leader_term", entry.Term))
@@ -559,4 +625,16 @@ func (r *Raft) IncrementLastApplied() {
 	r.n.meta.Lock()
 	r.n.meta.lastAppliedToSM++
 	r.n.meta.Unlock()
+}
+
+func (n *raftNode) shutdown() {
+	n.shutdownOnce.Do(func() {
+		if n.heartbeatCloser != nil {
+			select {
+			case <-n.heartbeatCloser:
+			default:
+				close(n.heartbeatCloser)
+			}
+		}
+	})
 }
