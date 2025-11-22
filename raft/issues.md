@@ -18,6 +18,7 @@ These invariants MUST be tested and working before adding persistence layer:
 
 [bugs]:
 [] when a leader transitions back to a follower and another node becomes the leader, it fails to replicate on majority of nodes
+[] load testing giving weird errors, data is replicating, but when getting its not found
 
 ## NON-TRIAGED (NOT BLOCKING PERSISTENCE LAYER)
 These can be addressed after persistence layer is working:

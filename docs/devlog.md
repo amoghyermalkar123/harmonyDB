@@ -73,3 +73,13 @@ by building a lot and then creating some learning material to cement my knowledg
 the best way would be that when I'm satisfied enough with this distributed database project, my mind will be at ease
 and then I will take up clojure & jepsen for test my distributed db with those then. For now, we're good with
 sticking to the basics.
+
+[22/11] I realized why raft durability has to run seperately from the actual kv storage that makes up the core of the database
+I was testing harmonydb on my local today with a few new changes, i had added a docker compose setup for better experience
+of running a 3-node local cluster. When i ran the load test the test ran with 100% success rate. raft consensus is reached
+when successfull replication and application of committed entries on the leader happens and the updated commit index is
+communicated in the next heartbeat/ append entries rpc whicheveer happens first. But with the compose changes i had done
+i realized that the database files weren't being created and since in the current implementation raft is purely in-mem i realized
+that in real environments as well, the consensus works much seperately than the underlying kv from a file perspective. Everything
+should go in the kv in order and something happens to the core durable file, everything is ruined. Hence it's better to have a WAL based
+file-backed persistence for raft to maintain totally ordered history incase the main engine is effed.
