@@ -4,50 +4,114 @@ services:
   node1:
     build: .
     ports:
-      - "8080:8080"
+      - "8081:8081"    # HTTP API
+      - "9091:9091"    # Raft consensus
+      - "6061:6061"    # Debug UI
     environment:
-      - PORT=8080
+      - PORT=8081
+      - RAFT_PORT=9091
       - NODE_ID=1
-      - CLUSTER_NODES=node1:8080,node2:8081,node3:8082
+      - DEBUG=true
+      - DEBUG_PORT=6061
+      - CLUSTER_ADDRESS_PREFIX=node
     networks:
       - harmonydb-cluster
+    volumes:
+      - ./data/node1:/var/lib/harmonydb
+      - ./logs/node1:/var/log/harmonydb
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8081/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
 
   node2:
     build: .
     ports:
-      - "8081:8081"
+      - "8082:8082"    # HTTP API
+      - "9092:9092"    # Raft consensus
+      - "6062:6062"    # Debug UI
     environment:
-      - PORT=8081
+      - PORT=8082
+      - RAFT_PORT=9092
       - NODE_ID=2
-      - CLUSTER_NODES=node1:8080,node2:8081,node3:8082
+      - DEBUG=true
+      - DEBUG_PORT=6062
+      - CLUSTER_ADDRESS_PREFIX=node
     networks:
       - harmonydb-cluster
+    volumes:
+      - ./data/node2:/var/lib/harmonydb
+      - ./logs/node2:/var/log/harmonydb
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8082/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
 
   node3:
     build: .
     ports:
-      - "8082:8082"
+      - "8083:8083"    # HTTP API
+      - "9093:9093"    # Raft consensus
+      - "6063:6063"    # Debug UI
     environment:
-      - PORT=8082
+      - PORT=8083
+      - RAFT_PORT=9093
       - NODE_ID=3
-      - CLUSTER_NODES=node1:8080,node2:8081,node3:8082
+      - DEBUG=true
+      - DEBUG_PORT=6063
+      - CLUSTER_ADDRESS_PREFIX=node
     networks:
       - harmonydb-cluster
+    volumes:
+      - ./data/node3:/var/lib/harmonydb
+      - ./logs/node3:/var/log/harmonydb
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8083/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
 
-  jepsen:
-    build:
-      context: ./jepsen
-      dockerfile: Dockerfile
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    networks:
+      - harmonydb-cluster
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
     depends_on:
       - node1
       - node2
       - node3
-    environment:
-      - HARMONYDB_NODES=node1:8080,node2:8081,node3:8082
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
     networks:
       - harmonydb-cluster
     volumes:
-      - ./jepsen/results:/jepsen/results
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    depends_on:
+      - prometheus
+
+volumes:
+  prometheus-data:
+  grafana-data:
 
 networks:
   harmonydb-cluster:

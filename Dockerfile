@@ -33,7 +33,8 @@ RUN mkdir -p /var/lib/harmonydb /var/log/harmonydb
 # Expose ports
 # 8080: HTTP API (default)
 # 9090: Raft consensus (default)
-EXPOSE 8080 9090
+# 6060: Debug UI (default)
+EXPOSE 8080 9090 6060
 
 # Set default environment variables
 ENV RAFT_PORT=9090

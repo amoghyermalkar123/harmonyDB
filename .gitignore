@@ -1,2 +1,6 @@
 *.db
 *.log
+
+# Docker volumes
+data/
+logs/

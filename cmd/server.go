@@ -34,12 +34,15 @@ func main() {
 
 	// Define the full cluster configuration
 	// All nodes must know about all other nodes
+	// Use environment variable to determine if running in Docker
+	addressPrefix := getAddressPrefixFromEnv()
+
 	clusterConfig := raft.ClusterConfig{
 		ThisNodeID: nodeID,
 		Nodes: map[int64]raft.NodeConfig{
-			1: {ID: 1, RaftPort: 9091, HTTPPort: 8081, Address: "localhost"},
-			2: {ID: 2, RaftPort: 9092, HTTPPort: 8082, Address: "localhost"},
-			3: {ID: 3, RaftPort: 9093, HTTPPort: 8083, Address: "localhost"},
+			1: {ID: 1, RaftPort: 9091, HTTPPort: 8081, Address: addressPrefix + "1"},
+			2: {ID: 2, RaftPort: 9092, HTTPPort: 8082, Address: addressPrefix + "2"},
+			3: {ID: 3, RaftPort: 9093, HTTPPort: 8083, Address: addressPrefix + "3"},
 		},
 	}
 
@@ -151,4 +154,15 @@ func getRaftPortFromEnv() int {
 	}
 
 	return port
+}
+
+func getAddressPrefixFromEnv() string {
+	// Check if CLUSTER_ADDRESS_PREFIX is set (for Docker: "node")
+	// Otherwise use "localhost" for local development
+	prefix := os.Getenv("CLUSTER_ADDRESS_PREFIX")
+	if prefix == "" {
+		// Default to localhost for local development
+		return "localhost"
+	}
+	return prefix
 }

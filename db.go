@@ -49,7 +49,14 @@ func Open(raftPort int, httpPort int) (*DB, error) {
 
 func OpenWithConfig(clusterConfig raft.ClusterConfig) (*DB, error) {
 	// Use node ID to create unique database file for each node
-	dbPath := fmt.Sprintf("harmony-%d.db", clusterConfig.ThisNodeID)
+	// Check if DATA_DIR environment variable is set, otherwise use current directory
+	dataDir := "/var/lib/harmonydb"
+	dbPath := fmt.Sprintf("%s/harmony-%d.db", dataDir, clusterConfig.ThisNodeID)
+
+	GetLogger().Info("Opening database",
+		zap.String("component", "db"),
+		zap.String("path", dbPath),
+		zap.Int64("node_id", clusterConfig.ThisNodeID))
 
 	db := &DB{
 		kv:         NewBTreeWithPath(dbPath),
@@ -71,12 +78,29 @@ func (db *DB) scheduler() {
 		// the schedule which is a fifo queue and adds entries to the underlying
 		// kv storage
 		case d := <-db.consensus.Ready():
-			GetLogger().Debug("Scheduler Triggered")
+			GetLogger().Debug("Scheduler Triggered",
+				zap.String("component", "scheduler"),
+				zap.Int("num_entries", len(d.Entries)))
 
-			for _, log := range d.Entries {
+			for i, log := range d.Entries {
+				GetLogger().Debug("Applying log entry",
+					zap.String("component", "scheduler"),
+					zap.Int("index", i),
+					zap.String("key", log.Data.Key),
+					zap.String("value", log.Data.Value))
+
 				if err := db.kv.put([]byte(log.Data.Key), []byte(log.Data.Value)); err != nil {
+					GetLogger().Error("Failed to put in btree",
+						zap.String("component", "scheduler"),
+						zap.String("key", log.Data.Key),
+						zap.Error(err))
 					panic(fmt.Sprintf("put: should never panic: (%v)", err))
 				}
+
+				GetLogger().Info("Successfully applied log entry",
+					zap.String("component", "scheduler"),
+					zap.String("key", log.Data.Key),
+					zap.String("value", log.Data.Value))
 			}
 		}
 	}
