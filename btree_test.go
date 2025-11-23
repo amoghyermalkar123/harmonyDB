@@ -223,19 +223,19 @@ func TestBTreeStoreOperations(t *testing.T) {
 			require.NoError(t, err)
 		}
 
-		assert.Greater(t, len(bt.cache), 0)
+		assert.Greater(t, bt.cache.len(), 0)
 	})
 
 	t.Run("file offset uniqueness", func(t *testing.T) {
 		bt := NewBTree()
 
-		for i := 0; i < 5; i++ {
-			err := bt.put([]byte(fmt.Sprintf("key%d", i)), []byte("val"))
+		for i := range 5 {
+			err := bt.put(fmt.Appendf(nil, "key%d", i), []byte("val"))
 			require.NoError(t, err)
 		}
 
 		offsets := make(map[uint64]bool)
-		for _, page := range bt.cache {
+		for _, page := range bt.cache.all() {
 			assert.False(t, offsets[page.fileOffset], "duplicate file offset found")
 			offsets[page.fileOffset] = true
 		}
@@ -246,7 +246,7 @@ func _TestBTreeIntegration(t *testing.T) {
 	t.Run("100 sequential puts then random gets", func(t *testing.T) {
 		bt := NewBTree()
 
-		for i := 0; i < 100; i++ {
+		for i := range 100 {
 			key := []byte(fmt.Sprintf("key%04d", i))
 			val := []byte(fmt.Sprintf("val%04d", i))
 			err := bt.put(key, val)

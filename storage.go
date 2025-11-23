@@ -9,10 +9,54 @@ import (
 	"time"
 )
 
+type cache struct {
+	nodes map[int64]*Node
+	sync.Mutex
+}
+
+func (c *cache) add(pg *Node) {
+	c.Lock()
+	defer c.Unlock()
+
+	c.nodes[int64(pg.fileOffset)] = pg
+}
+
+func (c *cache) fetch(fo uint64) *Node {
+	c.Lock()
+	defer c.Unlock()
+
+	return c.nodes[int64(fo)]
+}
+
+func (c *cache) remove(fo uint64) {
+	c.Lock()
+	defer c.Unlock()
+
+	delete(c.nodes, int64(fo))
+}
+
+func (c *cache) len() int {
+	c.Lock()
+	defer c.Unlock()
+
+	return len(c.nodes)
+}
+
+func (c *cache) all() map[int64]*Node {
+	c.Lock()
+	defer c.Unlock()
+
+	result := make(map[int64]*Node, len(c.nodes))
+	for k, v := range c.nodes {
+		result[k] = v
+	}
+	return result
+}
+
 type fileStore struct {
 	file           *os.File
 	lock           sync.Mutex
-	cache          map[int64]*Node
+	cache          *cache
 	nextFreeOffset uint64
 	rootOffset     uint64
 }
@@ -25,7 +69,7 @@ func newFileStore(path string) (*fileStore, error) {
 
 	f := &fileStore{
 		file:  file,
-		cache: make(map[int64]*Node),
+		cache: &cache{nodes: make(map[int64]*Node)},
 	}
 
 	go func() {
@@ -55,7 +99,7 @@ func (f *fileStore) flushPages() error {
 	f.lock.Lock()
 	defer f.lock.Unlock()
 
-	for _, page := range f.cache {
+	for _, page := range f.cache.nodes {
 		if !page.isDirty {
 			continue
 		}
@@ -82,7 +126,14 @@ func (f *fileStore) update(node *Node) error {
 		return fmt.Errorf("write: %w", err)
 	}
 
-	f.cache[int64(node.fileOffset)] = node
+	if err := f.file.Sync(); err != nil {
+		return fmt.Errorf("sync: %w", err)
+	}
+
+	f.cache.Lock()
+	defer f.cache.Unlock()
+
+	f.cache.nodes[int64(node.fileOffset)] = node
 
 	return nil
 }

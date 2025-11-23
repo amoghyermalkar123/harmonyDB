@@ -41,12 +41,12 @@ type store struct {
 
 func (b *BTree) add(pg *Node) {
 	pg.setFileOffsetForNode(b.nextFreeOffset)
-	b.cache[int64(pg.fileOffset)] = pg
+	b.cache.add(pg)
 	b.nextFreeOffset += pageSize
 }
 
 func (b *BTree) fetch(fo uint64) *Node {
-	return b.cache[int64(fo)]
+	return b.cache.fetch(fo)
 }
 
 func (b *BTree) getRootPage() *Node {
@@ -99,6 +99,7 @@ func (b *BTree) insertLeaf(parent, curr *Node, key, value []byte) error {
 	// Check if key already exists and update it
 	existingCell := curr.findLeafCell(key)
 	if existingCell != nil {
+		// TODO: this doesn't work for some reason
 		// Update existing value
 		existingCell.val = value
 		existingCell.valSize = uint32(len(value))
@@ -159,10 +160,9 @@ func (b *BTree) insertInternal(parent, curr *Node, key, value []byte) error {
 	// 4. check if the internal node is full, if not return nil
 	// 5. if yes, split, add sep key to node
 
-	// TODO: use a different searcher here
 	offset := curr.findChildPage(key)
 	fileOffset := curr.internalCell[offset].fileOffset
-	childpg := b.cache[int64(fileOffset)]
+	childpg := b.cache.fetch(fileOffset)
 
 	if childpg.isLeaf {
 		b.insertLeaf(curr, childpg, key, value)
@@ -180,7 +180,11 @@ func (b *BTree) insertInternal(parent, curr *Node, key, value []byte) error {
 	b.add(newpg)
 
 	of := newpg.findInsPointForKey(sep)
-	newpg.insertInternalCell(of, newpg.fileOffset, sep)
+	if of == uint16(len(parent.offsets)) {
+		parent.appendInternalCell(newpg.fileOffset, sep)
+	} else {
+		parent.insertInternalCell(of, newpg.fileOffset, sep)
+	}
 
 	return nil
 }
