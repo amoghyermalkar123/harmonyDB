@@ -103,6 +103,8 @@ func (r *Raft) initializeCluster() {
 	}
 
 	r.n.Lock()
+	defer r.n.Unlock()
+
 	r.n.cluster = cluster
 
 	// Initialize nextIndex for all peers
@@ -112,7 +114,6 @@ func (r *Raft) initializeCluster() {
 			r.n.nextIndex[peerID] = 1
 		}
 	}
-	r.n.Unlock()
 
 	getLogger().Info("Cluster initialization complete",
 		zap.String("component", "raft"),

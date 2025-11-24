@@ -71,9 +71,6 @@ func (n *Raft) Ready() chan ToApply {
 var electionTO = time.Duration(150+rand.Intn(150)) * time.Millisecond
 var heartbeatTO = time.Duration(50) * time.Millisecond
 
-// var electionTO = time.Duration(1100+rand.Intn(1000)+rand.Intn(999)) * time.Millisecond
-// var heartbeatTO = time.Duration(500+rand.Intn(500)) * time.Millisecond
-
 type NodeType int8
 
 const (
