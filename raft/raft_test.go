@@ -176,6 +176,7 @@ func (c *testCluster) put(ctx context.Context, key, val []byte) error {
 	if leader == nil {
 		return fmt.Errorf("no leader available")
 	}
+
 	return leader.Put(ctx, key, val)
 }
 

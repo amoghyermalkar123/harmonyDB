@@ -69,6 +69,7 @@ func (r *Raft) Put(ctx context.Context, key, val []byte) error {
 		// TODO: Forward request to leader
 		return ErrNotALeader
 	}
+
 	return r.n.replicate(ctx, key, val)
 }
 
