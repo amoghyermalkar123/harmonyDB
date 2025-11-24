@@ -10,7 +10,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// setupTestLogger initializes a test logger for btree tests
+func setupTestLogger(t *testing.T) {
+	// Initialize logger using the same system as the main application
+	// This will respect HARMONYDB_DEBUG environment variables
+	if err := InitLogger(8080, true); err != nil {
+		t.Fatalf("Failed to initialize test logger: %v", err)
+	}
+}
+
 func TestBasicBTree(t *testing.T) {
+	setupTestLogger(t)
 	bt := NewBTree()
 
 	err := bt.put([]byte("amogh"), []byte("yermalkar"))
@@ -22,6 +32,7 @@ func TestBasicBTree(t *testing.T) {
 }
 
 func TestBTreeGetNonExistent(t *testing.T) {
+	setupTestLogger(t)
 	bt := NewBTree()
 
 	_, err := bt.Get([]byte("missing"))
@@ -30,6 +41,7 @@ func TestBTreeGetNonExistent(t *testing.T) {
 }
 
 func TestBTreeMultiplePutGet(t *testing.T) {
+	setupTestLogger(t)
 	bt := NewBTree()
 
 	testData := map[string]string{
@@ -53,6 +65,7 @@ func TestBTreeMultiplePutGet(t *testing.T) {
 }
 
 func TestBTreeRootTransition(t *testing.T) {
+	setupTestLogger(t)
 	t.Run("first insert creates leaf root", func(t *testing.T) {
 		bt := NewBTree()
 		err := bt.put([]byte("first"), []byte("value"))
@@ -77,6 +90,7 @@ func TestBTreeRootTransition(t *testing.T) {
 }
 
 func TestBTreeSequentialInsertions(t *testing.T) {
+	setupTestLogger(t)
 	t.Run("ascending order", func(t *testing.T) {
 		bt := NewBTree()
 
@@ -155,6 +169,7 @@ func TestBTreeSequentialInsertions(t *testing.T) {
 }
 
 func TestBTreeKeyValueVariations(t *testing.T) {
+	setupTestLogger(t)
 	t.Run("empty key and value", func(t *testing.T) {
 		bt := NewBTree()
 
@@ -215,6 +230,7 @@ func TestBTreeKeyValueVariations(t *testing.T) {
 }
 
 func TestBTreeStoreOperations(t *testing.T) {
+	setupTestLogger(t)
 	t.Run("page storage grows", func(t *testing.T) {
 		bt := NewBTree()
 
@@ -308,6 +324,7 @@ func _TestBTreeIntegration(t *testing.T) {
 }
 
 func TestBTreeEdgeCases(t *testing.T) {
+	setupTestLogger(t)
 	t.Run("tree with single element", func(t *testing.T) {
 		bt := NewBTree()
 
@@ -324,6 +341,7 @@ func TestBTreeEdgeCases(t *testing.T) {
 }
 
 func TestBTreeRootSplitBug(t *testing.T) {
+	setupTestLogger(t)
 	t.Run("root splits correctly and becomes internal node", func(t *testing.T) {
 		bt := NewBTree()
 
@@ -363,6 +381,7 @@ func TestBTreeRootSplitBug(t *testing.T) {
 }
 
 func TestBTreeInternalNodeTraversal(t *testing.T) {
+	setupTestLogger(t)
 	t.Run("traverse internal nodes to find leaf cells", func(t *testing.T) {
 		bt := NewBTree()
 

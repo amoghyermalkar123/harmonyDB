@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/zap"
 )
 
 type testCluster struct {
@@ -23,7 +24,7 @@ func newTestCluster(t *testing.T, n int) *testCluster {
 		t:        t,
 		nodes:    make([]*Raft, n),
 		nodeIDs:  make([]int64, n),
-		basePort: 9000,
+		basePort: 4000,
 	}
 
 	nodeConfigs := make(map[int64]NodeConfig)
@@ -181,23 +182,35 @@ func (c *testCluster) put(ctx context.Context, key, val []byte) error {
 }
 
 func TestRaftLeaderElection(t *testing.T) {
+	// Initialize logger for test - use development config for better test output
+	config := zap.NewDevelopmentConfig()
+	testLogger, err := config.Build()
+	if err != nil {
+		t.Fatalf("Failed to initialize logger: %v", err)
+	}
+	defer testLogger.Sync()
+
+	// Set logger for raft package
+	SetLogger(testLogger)
+
 	cl := newTestCluster(t, 3)
 	defer cl.shutdown()
 
-	fmt.Println(1)
 	leader, err := cl.waitForLeader(1 * time.Second)
 	if err != nil {
 		t.Fatal("waitForLeader:", err)
 	}
 
-	fmt.Println(2)
 	assert.NotNil(t, leader)
+
+	fmt.Println("====")
 
 	if err := cl.put(context.Background(), []byte("key"), []byte("value")); err != nil {
 		t.Fatal("put:", err)
 	}
 
-	fmt.Println(3)
+	fmt.Println("==== waiting for commit")
+
 	if err := cl.waitForAllCommit(1, 200*time.Millisecond); err != nil {
 		t.Fatal("waitForAllCommit:", err)
 	}

@@ -19,6 +19,7 @@ type HTTPServer struct {
 	server *http.Server
 	port   int
 	mu     sync.RWMutex
+	logger *zap.Logger
 }
 
 type PutRequest struct {
@@ -48,16 +49,18 @@ func NewHTTPServerWithRaftPort(httpPort, raftPort int) *HTTPServer {
 	}
 
 	return &HTTPServer{
-		db:   db,
-		port: httpPort,
+		db:     db,
+		port:   httpPort,
+		logger: harmonydb.GetStructuredLogger("api"),
 	}
 }
 
 // NewHTTPServerWithDB creates a new HTTP server with an existing database instance
 func NewHTTPServerWithDB(db *harmonydb.DB, port int) *HTTPServer {
 	return &HTTPServer{
-		db:   db,
-		port: port,
+		db:     db,
+		port:   port,
+		logger: harmonydb.GetStructuredLogger("api"),
 	}
 }
 
@@ -76,7 +79,9 @@ func (h *HTTPServer) Start() error {
 		WriteTimeout: 10 * time.Second,
 	}
 
-	harmonydb.GetLogger().Info("Starting HTTP API server", zap.String("component", "api"), zap.Int("port", h.port))
+	h.logger.Info("Starting HTTP API server",
+		zap.String("operation", "start"),
+		zap.Int("port", h.port))
 	return h.server.ListenAndServe()
 }
 
@@ -107,7 +112,16 @@ func (h *HTTPServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *HTTPServer) handlePut(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	h.logger.Debug("Received PUT request",
+		zap.String("operation", "put"),
+		zap.String("remote_addr", r.RemoteAddr),
+		zap.String("user_agent", r.UserAgent()))
+
 	if r.Method != http.MethodPost {
+		h.logger.Debug("Method not allowed",
+			zap.String("operation", "put"),
+			zap.String("method", r.Method))
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -116,6 +130,10 @@ func (h *HTTPServer) handlePut(w http.ResponseWriter, r *http.Request) {
 
 	var req PutRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		harmonydb.LogErrorWithContext(h.logger, "Failed to decode JSON request", err,
+			zap.String("operation", "put"),
+			zap.String("remote_addr", r.RemoteAddr),
+			harmonydb.DurationFromTime(start))
 		response := Response{Success: false, Error: "Invalid JSON body"}
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(response)
@@ -123,6 +141,9 @@ func (h *HTTPServer) handlePut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Key == "" {
+		h.logger.Debug("Empty key provided",
+			zap.String("operation", "put"),
+			zap.String("remote_addr", r.RemoteAddr))
 		response := Response{Success: false, Error: "Key cannot be empty"}
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(response)
@@ -130,26 +151,48 @@ func (h *HTTPServer) handlePut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.db.Put([]byte(req.Key), []byte(req.Value)); err != nil {
-		// Check if this might be a redirection failure or other specific error
 		response := Response{Success: false, Error: err.Error()}
 
-		// If the error suggests leadership issues, use 503 Service Unavailable
+		statusCode := http.StatusInternalServerError
 		if strings.Contains(err.Error(), "leader") || strings.Contains(err.Error(), "redirect") {
-			w.WriteHeader(http.StatusServiceUnavailable)
-		} else {
-			w.WriteHeader(http.StatusInternalServerError)
+			statusCode = http.StatusServiceUnavailable
 		}
 
+		harmonydb.LogErrorWithContext(h.logger, "PUT operation failed", err,
+			zap.String("operation", "put"),
+			zap.String("remote_addr", r.RemoteAddr),
+			zap.String("key", req.Key),
+			zap.Int("value_size", len(req.Value)),
+			zap.Int("status_code", statusCode),
+			harmonydb.DurationFromTime(start))
+
+		w.WriteHeader(statusCode)
 		json.NewEncoder(w).Encode(response)
 		return
 	}
+
+	h.logger.Debug("PUT operation completed successfully",
+		zap.String("operation", "put"),
+		zap.String("remote_addr", r.RemoteAddr),
+		zap.String("key", req.Key),
+		zap.Int("value_size", len(req.Value)),
+		harmonydb.DurationFromTime(start))
 
 	response := Response{Success: true, Message: fmt.Sprintf("Successfully stored key: %s", req.Key)}
 	json.NewEncoder(w).Encode(response)
 }
 
 func (h *HTTPServer) handleGet(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	h.logger.Debug("Received GET request",
+		zap.String("operation", "get"),
+		zap.String("remote_addr", r.RemoteAddr),
+		zap.String("user_agent", r.UserAgent()))
+
 	if r.Method != http.MethodPost {
+		h.logger.Debug("Method not allowed",
+			zap.String("operation", "get"),
+			zap.String("method", r.Method))
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -158,6 +201,10 @@ func (h *HTTPServer) handleGet(w http.ResponseWriter, r *http.Request) {
 
 	var req GetRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		harmonydb.LogErrorWithContext(h.logger, "Failed to decode JSON request", err,
+			zap.String("operation", "get"),
+			zap.String("remote_addr", r.RemoteAddr),
+			harmonydb.DurationFromTime(start))
 		response := Response{Success: false, Error: "Invalid JSON body"}
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(response)
@@ -165,6 +212,9 @@ func (h *HTTPServer) handleGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Key == "" {
+		h.logger.Debug("Empty key provided",
+			zap.String("operation", "get"),
+			zap.String("remote_addr", r.RemoteAddr))
 		response := Response{Success: false, Error: "Key cannot be empty"}
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(response)
@@ -173,11 +223,23 @@ func (h *HTTPServer) handleGet(w http.ResponseWriter, r *http.Request) {
 
 	val, err := h.db.Get([]byte(req.Key))
 	if err != nil {
+		harmonydb.LogErrorWithContext(h.logger, "GET operation failed", err,
+			zap.String("operation", "get"),
+			zap.String("remote_addr", r.RemoteAddr),
+			zap.String("key", req.Key),
+			harmonydb.DurationFromTime(start))
 		response := Response{Success: false, Error: fmt.Sprintf("Get failed: %v", err)}
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(response)
 		return
 	}
+
+	h.logger.Debug("GET operation completed successfully",
+		zap.String("operation", "get"),
+		zap.String("remote_addr", r.RemoteAddr),
+		zap.String("key", req.Key),
+		zap.Int("value_size", len(val)),
+		harmonydb.DurationFromTime(start))
 
 	response := Response{
 		Success: true,
@@ -188,21 +250,38 @@ func (h *HTTPServer) handleGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *HTTPServer) handleLeader(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	h.logger.Debug("Received leader request",
+		zap.String("operation", "leader"),
+		zap.String("remote_addr", r.RemoteAddr))
+
 	if r.Method != http.MethodGet {
+		h.logger.Debug("Method not allowed",
+			zap.String("operation", "leader"),
+			zap.String("method", r.Method))
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 
-	// Access the raft instance through the database
 	leaderID := h.db.GetLeaderID()
 	if leaderID == 0 {
+		h.logger.Debug("No leader elected",
+			zap.String("operation", "leader"),
+			zap.String("remote_addr", r.RemoteAddr),
+			harmonydb.DurationFromTime(start))
 		response := Response{Success: false, Error: "No leader elected"}
 		w.WriteHeader(http.StatusServiceUnavailable)
 		json.NewEncoder(w).Encode(response)
 		return
 	}
+
+	h.logger.Debug("Leader request completed successfully",
+		zap.String("operation", "leader"),
+		zap.String("remote_addr", r.RemoteAddr),
+		zap.Int64("leader_id", leaderID),
+		harmonydb.DurationFromTime(start))
 
 	response := Response{
 		Success: true,

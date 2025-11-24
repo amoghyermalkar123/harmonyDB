@@ -1,2 +1,28 @@
+# Database files
 *.db
+
+# Log files
 *.log
+
+# Go specific
+*.exe
+*.test
+vendor/
+*.out
+
+# IDE and editor files
+.DS_Store
+Thumbs.db
+*.tmp
+*.swp
+.vscode/
+.idea/
+
+# Environment files
+.env*
+
+specs/
+.claude
+.specify
+CLAUDE.md
+worktrees/

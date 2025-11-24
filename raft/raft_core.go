@@ -11,6 +11,7 @@ package raft
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/rand"
 
 	"sync"
@@ -80,6 +81,19 @@ const (
 	Leader
 )
 
+func nodeTypeString(nt NodeType) string {
+	switch nt {
+	case Follower:
+		return "follower"
+	case Candidate:
+		return "candidate"
+	case Leader:
+		return "leader"
+	default:
+		return "unknown"
+	}
+}
+
 type ToApply struct {
 	Entries []*proto.Log
 }
@@ -130,9 +144,11 @@ func (n *raftNode) CommitIdx(idx int64) {
 
 	// Apply newly committed entries to the state machine
 	if idx > oldCommitIndex {
+		fmt.Println("debug 4")
 		n.applyc <- ToApply{
 			Entries: n.logManager.GetLogsAfter(oldCommitIndex),
 		}
+		fmt.Println("debug 5")
 	}
 }
 
@@ -298,17 +314,36 @@ func (n *raftNode) RequestVoteRPC(ctx context.Context, in *proto.RequestVote) (*
 // log replication
 // TODO: only allow leader to replicate, otherwise re-route request to it
 func (n *raftNode) replicate(ctx context.Context, key, val []byte) error {
-	getLogger().Info("Starting replication", zap.String("component", "raft"), zap.String("key", string(key)), zap.String("value", string(val)))
+	n.state.Lock()
+	currentTerm := n.state.currentTerm
+	n.state.Unlock()
+
+	logID := n.logManager.NextLogID()
+
+	getLogger().Debug("Starting log replication",
+		zap.String("component", "raft"),
+		zap.String("operation", "replication"),
+		zap.Int64("node_id", n.ID),
+		zap.String("key", string(key)),
+		zap.Int("value_size", len(val)),
+		zap.Int64("log_id", logID),
+		zap.Int64("term", currentTerm))
 
 	newlog := &proto.Log{
-		Term: n.state.currentTerm,
-		Id:   n.logManager.NextLogID(),
+		Term: currentTerm,
+		Id:   logID,
 		Data: &proto.Cmd{
 			Op:    "PUT",
 			Key:   string(key),
 			Value: string(val),
 		},
 	}
+
+	getLogger().Debug("Appending log entry to WAL",
+		zap.String("component", "raft"),
+		zap.String("operation", "replication"),
+		zap.Int64("node_id", n.ID),
+		zap.Int64("log_id", logID))
 
 	n.logManager.Append(newlog)
 
@@ -317,25 +352,80 @@ func (n *raftNode) replicate(ctx context.Context, key, val []byte) error {
 		peers = append(peers, k)
 	}
 
+	getLogger().Debug("Starting append entries to peers",
+		zap.String("component", "raft"),
+		zap.String("operation", "replication"),
+		zap.Int64("node_id", n.ID),
+		zap.Int64("log_id", logID),
+		zap.Int("peer_count", len(peers)))
+
+	replicationRounds := 0
 	for true {
 		var err error
+		replicationRounds++
+
+		getLogger().Debug("Sending append entries round",
+			zap.String("component", "raft"),
+			zap.String("operation", "replication"),
+			zap.Int64("node_id", n.ID),
+			zap.Int64("log_id", logID),
+			zap.Int("round", replicationRounds),
+			zap.Int("remaining_peers", len(peers)))
 
 		peers, err = n.sendAppendEntries(peers)
 		if peers == nil && err == nil {
+			getLogger().Debug("Append entries completed successfully",
+				zap.String("component", "raft"),
+				zap.String("operation", "replication"),
+				zap.Int64("node_id", n.ID),
+				zap.Int64("log_id", logID),
+				zap.Int("total_rounds", replicationRounds))
 			break
+		}
+
+		if err != nil {
+			getLogger().Debug("Append entries round failed, retrying",
+				zap.String("component", "raft"),
+				zap.String("operation", "replication"),
+				zap.Int64("node_id", n.ID),
+				zap.Int64("log_id", logID),
+				zap.Int("round", replicationRounds),
+				zap.Error(err))
 		}
 	}
 
 	replStatus := 0
+	peerStatuses := make(map[int64]bool)
 
 	for peer := range n.cluster {
 		idx := n.matchIndex[peer]
 		if idx == newlog.Id {
 			replStatus += 1
+			peerStatuses[peer] = true
+		} else {
+			peerStatuses[peer] = false
 		}
 	}
 
-	if replStatus >= len(n.cluster)/2+1 {
+	requiredReplicas := len(n.cluster)/2 + 1
+
+	getLogger().Debug("Checking replication status",
+		zap.String("component", "raft"),
+		zap.String("operation", "replication"),
+		zap.Int64("node_id", n.ID),
+		zap.Int64("log_id", logID),
+		zap.Int("successful_replicas", replStatus),
+		zap.Int("required_replicas", requiredReplicas),
+		zap.Int("total_peers", len(n.cluster)))
+
+	if replStatus >= requiredReplicas {
+		getLogger().Debug("Committing log entry - majority replication achieved",
+			zap.String("component", "raft"),
+			zap.String("operation", "replication"),
+			zap.Int64("node_id", n.ID),
+			zap.Int64("log_id", logID),
+			zap.Int("successful_replicas", replStatus))
+
 		// log has been successfully applied to the state machine,
 		// now commit this log.
 		n.CommitIdx(newlog.Id)
@@ -345,6 +435,14 @@ func (n *raftNode) replicate(ctx context.Context, key, val []byte) error {
 		return nil
 	}
 
+	getLogger().Debug("Replication failed - insufficient replicas",
+		zap.String("component", "raft"),
+		zap.String("operation", "replication"),
+		zap.Int64("node_id", n.ID),
+		zap.Int64("log_id", logID),
+		zap.Int("successful_replicas", replStatus),
+		zap.Int("required_replicas", requiredReplicas))
+
 	return ErrFailedToReplicate
 }
 
@@ -352,9 +450,6 @@ func (n *raftNode) replicate(ctx context.Context, key, val []byte) error {
 // who responded with false rpc response. The caller must them to retry
 // returns nil array and error when the replication was successfull
 func (n *raftNode) sendAppendEntries(peers []int64) ([]int64, error) {
-	// TODO: this is incorrect log term calculation, if the previous
-	// entries weren't replicated properly, ..
-
 	failedPeers := []int64{}
 
 	for _, peer := range peers {
@@ -381,8 +476,6 @@ func (n *raftNode) sendAppendEntries(peers []int64) ([]int64, error) {
 			LeaderCommitIdx: n.meta.lastCommitIndex,
 		})
 
-		// TODO: decrement nextIndex when log consistency check fails
-		// i.e. line 242
 		if err != nil {
 			failedPeers = append(failedPeers, peer)
 			getLogger().Debug("Peer failed to respond", zap.String("component", "raft"), zap.Int64("peer_id", peer))
@@ -438,6 +531,12 @@ func (n *raftNode) startElection() {
 			if n.meta.nt == Leader || len(n.cluster) < 2 {
 				newTimeout := time.Duration(150+r.Intn(150)) * time.Millisecond
 				electionTimeOut.Reset(newTimeout)
+				getLogger().Debug("Election timeout skipped - already leader or insufficient cluster size",
+					zap.String("component", "raft"),
+					zap.String("operation", "election"),
+					zap.Int64("node_id", n.ID),
+					zap.String("current_state", nodeTypeString(n.meta.nt)),
+					zap.Int("cluster_size", len(n.cluster)))
 				continue
 			}
 
@@ -445,35 +544,87 @@ func (n *raftNode) startElection() {
 			newTimeout := time.Duration(150+r.Intn(150)) * time.Millisecond
 			electionTimeOut.Reset(newTimeout)
 
+			getLogger().Debug("Election timeout triggered - starting new election",
+				zap.String("component", "raft"),
+				zap.String("operation", "election"),
+				zap.Int64("node_id", n.ID),
+				zap.Int64("current_term", n.state.currentTerm))
+
 			// increment currentTerm
 			n.state.Lock()
 			n.state.currentTerm += 1
-			n.state.Unlock()
-
-			n.state.Lock()
 			n.state.pastVotes[n.state.currentTerm] = n.ID
+			newTerm := n.state.currentTerm
 			n.state.Unlock()
 
-			// transition to candiadte
+			getLogger().Debug("Incremented term and voting for self",
+				zap.String("component", "raft"),
+				zap.String("operation", "election"),
+				zap.Int64("node_id", n.ID),
+				zap.Int64("new_term", newTerm))
+
 			// start election
 			votes := 1
-			for _, node := range n.cluster {
+			rejections := 0
+			errors := 0
+
+			for nodeID, node := range n.cluster {
+				getLogger().Debug("Requesting vote from peer",
+					zap.String("component", "raft"),
+					zap.String("operation", "election"),
+					zap.Int64("node_id", n.ID),
+					zap.Int64("peer_id", nodeID),
+					zap.Int64("term", newTerm))
+
 				voteResponse, err := node.RequestVoteRPC(context.TODO(), &proto.RequestVote{
-					Term:         n.state.currentTerm,
+					Term:         newTerm,
 					CandidateId:  n.ID,
 					LastLogIndex: n.logManager.GetLastLogID(),
 					LastLogTerm:  n.logManager.GetLastLogTerm(),
 				})
 
+				// TODO: exponential backoff
 				if err != nil {
+					errors++
+					getLogger().Debug("Vote request failed",
+						zap.String("component", "raft"),
+						zap.String("operation", "election"),
+						zap.Int64("node_id", n.ID),
+						zap.Int64("peer_id", nodeID),
+						zap.Error(err))
 					continue
 				}
 
 				if voteResponse.VoteGranted {
-					votes += 1
+					votes++
+					getLogger().Debug("Vote granted by peer",
+						zap.String("component", "raft"),
+						zap.String("operation", "election"),
+						zap.Int64("node_id", n.ID),
+						zap.Int64("peer_id", nodeID),
+						zap.Int64("term", newTerm))
+				} else {
+					rejections++
+					getLogger().Debug("Vote rejected by peer",
+						zap.String("component", "raft"),
+						zap.String("operation", "election"),
+						zap.Int64("node_id", n.ID),
+						zap.Int64("peer_id", nodeID),
+						zap.Int64("term", newTerm),
+						zap.Int64("peer_term", voteResponse.Term))
 				}
-
 			}
+
+			majority := len(n.cluster)/2 + 1
+			getLogger().Debug("Election voting completed",
+				zap.String("component", "raft"),
+				zap.String("operation", "election"),
+				zap.Int64("node_id", n.ID),
+				zap.Int64("term", newTerm),
+				zap.Int("votes_received", votes),
+				zap.Int("votes_needed", majority),
+				zap.Int("rejections", rejections),
+				zap.Int("errors", errors))
 
 			// elect leader if votes granted by more than half of the nodes
 			// present in the cluster
@@ -486,13 +637,44 @@ func (n *raftNode) startElection() {
 				n.leaderID = n.ID
 				n.Unlock()
 
-				n.heartbeatCloser = make(chan struct{})
+				getLogger().Info("Successfully elected as leader",
+					zap.String("component", "raft"),
+					zap.String("operation", "election"),
+					zap.Int64("node_id", n.ID),
+					zap.Int64("term", newTerm),
+					zap.Int("votes_received", votes),
+					zap.Int("cluster_size", len(n.cluster)+1))
 
+				n.heartbeatCloser = make(chan struct{})
 				go n.sendHeartbeats()
+			} else {
+				getLogger().Debug("Election failed - insufficient votes",
+					zap.String("component", "raft"),
+					zap.String("operation", "election"),
+					zap.Int64("node_id", n.ID),
+					zap.Int64("term", newTerm),
+					zap.Int("votes_received", votes),
+					zap.Int("votes_needed", majority))
 			}
+
 		case entry := <-n.heartbeats:
 			// TODO: apply comitted entries
+			getLogger().Debug("Received heartbeat",
+				zap.String("component", "raft"),
+				zap.String("operation", "election"),
+				zap.Int64("node_id", n.ID),
+				zap.String("current_state", nodeTypeString(n.meta.nt)),
+				zap.Int64("heartbeat_term", entry.Term),
+				zap.Int64("current_term", n.state.currentTerm))
+
 			if n.meta.nt == Leader && entry.Term > n.state.currentTerm {
+				getLogger().Debug("Stepping down as leader due to higher term heartbeat",
+					zap.String("component", "raft"),
+					zap.String("operation", "election"),
+					zap.Int64("node_id", n.ID),
+					zap.Int64("current_term", n.state.currentTerm),
+					zap.Int64("heartbeat_term", entry.Term))
+
 				// stop sending heartbeats
 				close(n.heartbeatCloser)
 
@@ -508,15 +690,27 @@ func (n *raftNode) startElection() {
 			// up-to-date ness
 			newTimeout := time.Duration(150+r.Intn(150)) * time.Millisecond
 			electionTimeOut.Reset(newTimeout)
-			getLogger().Debug("Node received leader heartbeat", zap.String("component", "raft"), zap.Int64("node_id", n.ID), zap.Int64("leader_term", entry.Term))
+			// getLogger().Debug("Node received leader heartbeat", zap.String("component", "raft"), zap.Int64("node_id", n.ID), zap.Int64("leader_term", entry.Term))
 		}
 	}
 }
 
 func (n *raftNode) sendHeartbeats() {
 	if n.meta.nt != Leader {
+		getLogger().Debug("Attempted to send heartbeats but not a leader",
+			zap.String("component", "raft"),
+			zap.String("operation", "heartbeat"),
+			zap.Int64("node_id", n.ID),
+			zap.String("current_state", nodeTypeString(n.meta.nt)))
 		return
 	}
+
+	getLogger().Debug("Starting heartbeat routine",
+		zap.String("component", "raft"),
+		zap.String("operation", "heartbeat"),
+		zap.Int64("node_id", n.ID),
+		zap.Duration("interval", heartbeatTO),
+		zap.Int("cluster_size", len(n.cluster)))
 
 	heartbeats := time.NewTicker(heartbeatTO)
 
@@ -524,26 +718,83 @@ func (n *raftNode) sendHeartbeats() {
 		select {
 		case _, ok := <-n.heartbeatCloser:
 			if !ok {
+				getLogger().Debug("Heartbeat routine stopped",
+					zap.String("component", "raft"),
+					zap.String("operation", "heartbeat"),
+					zap.Int64("node_id", n.ID))
 				heartbeats.Stop()
 				return
 			}
+
 		case <-heartbeats.C:
-			for _, node := range n.cluster {
+			n.state.Lock()
+			currentTerm := n.state.currentTerm
+			n.state.Unlock()
+
+			n.meta.RLock()
+			commitIndex := n.meta.lastCommitIndex
+			n.meta.RUnlock()
+
+			lastLogID := n.logManager.GetLastLogID()
+			lastLogTerm := n.logManager.GetLastLogTerm()
+
+			getLogger().Debug("Sending heartbeat round to all peers",
+				zap.String("component", "raft"),
+				zap.String("operation", "heartbeat"),
+				zap.Int64("node_id", n.ID),
+				zap.Int64("term", currentTerm),
+				zap.Int64("commit_index", commitIndex),
+				zap.Int64("last_log_id", lastLogID),
+				zap.Int("peer_count", len(n.cluster)))
+
+			successfulHeartbeats := 0
+			failedHeartbeats := 0
+
+			for peerID, node := range n.cluster {
+				getLogger().Debug("Sending heartbeat to peer",
+					zap.String("component", "raft"),
+					zap.String("operation", "heartbeat"),
+					zap.Int64("node_id", n.ID),
+					zap.Int64("peer_id", peerID),
+					zap.Int64("term", currentTerm))
+
 				// Since this is a heartbeat message, we only need
 				// to send term and leader id to maintain the leader status
 				_, err := node.AppendEntriesRPC(context.TODO(), &proto.AppendEntries{
-					Term:        n.state.currentTerm,
-					LeaderId:    n.ID,
-					PrevLogIdx:  n.logManager.GetLastLogID(),
-					PrevLogTerm: n.logManager.GetLastLogTerm(),
+					Term:            currentTerm,
+					LeaderId:        n.ID,
+					PrevLogIdx:      lastLogID,
+					PrevLogTerm:     lastLogTerm,
+					LeaderCommitIdx: commitIndex,
 					// We don't need to send `Entries` array here.
-					LeaderCommitIdx: n.meta.lastCommitIndex,
 				})
 
 				if err != nil {
+					failedHeartbeats++
+					getLogger().Debug("Heartbeat failed to peer",
+						zap.String("component", "raft"),
+						zap.String("operation", "heartbeat"),
+						zap.Int64("node_id", n.ID),
+						zap.Int64("peer_id", peerID),
+						zap.Error(err))
 					continue
 				}
+
+				successfulHeartbeats++
+				getLogger().Debug("Heartbeat successful to peer",
+					zap.String("component", "raft"),
+					zap.String("operation", "heartbeat"),
+					zap.Int64("node_id", n.ID),
+					zap.Int64("peer_id", peerID))
 			}
+
+			getLogger().Debug("Heartbeat round completed",
+				zap.String("component", "raft"),
+				zap.String("operation", "heartbeat"),
+				zap.Int64("node_id", n.ID),
+				zap.Int("successful_heartbeats", successfulHeartbeats),
+				zap.Int("failed_heartbeats", failedHeartbeats),
+				zap.Int("total_peers", len(n.cluster)))
 		}
 	}
 }
