@@ -404,3 +404,61 @@ func GetTestLogPath() string {
 	}
 	return ""
 }
+
+// CreateNodeSpecificLogger creates a logger for a specific node in multi-node tests
+func CreateNodeSpecificLogger(nodeID int64, testName string) (*zap.Logger, error) {
+	// Detect debug mode from environment variables
+	debugConfig := detectDebugMode()
+
+	config := zap.NewProductionConfig()
+
+	// Set log level based on debug mode
+	logLevel := zap.InfoLevel
+	if debugConfig.Enabled {
+		logLevel = zap.DebugLevel
+	}
+	config.Level = zap.NewAtomicLevelAt(logLevel)
+
+	// Create node-specific log file
+	logPath := fmt.Sprintf("./%s_node_%d.log", testName, nodeID)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create encoder config for structured logging
+	encoderConfig := zapcore.EncoderConfig{
+		TimeKey:        "timestamp",
+		LevelKey:       "level",
+		NameKey:        "logger",
+		CallerKey:      "caller",
+		FunctionKey:    zapcore.OmitKey,
+		MessageKey:     "message",
+		StacktraceKey:  "stacktrace",
+		LineEnding:     zapcore.DefaultLineEnding,
+		EncodeLevel:    zapcore.LowercaseLevelEncoder,
+		EncodeTime:     zapcore.ISO8601TimeEncoder,
+		EncodeDuration: zapcore.SecondsDurationEncoder,
+		EncodeCaller:   zapcore.ShortCallerEncoder,
+	}
+
+	// For tests, use console encoder for file output to make it more readable
+	fileEncoder := zapcore.NewConsoleEncoder(encoderConfig)
+
+	// Create file-only core (no console output for individual nodes)
+	fileCore := zapcore.NewCore(fileEncoder, zapcore.AddSync(logFile), logLevel)
+
+	// Wrap with debug filter core for component-based filtering
+	var core zapcore.Core
+	if debugConfig.Enabled {
+		core = NewDebugFilterCore(fileCore, debugConfig)
+	} else {
+		core = fileCore
+	}
+
+	// Create logger with node_id field pre-populated
+	nodeLogger := zap.New(core, zap.AddCaller(), zap.AddStacktrace(zapcore.ErrorLevel))
+	nodeLoggerWithID := nodeLogger.With(zap.Int64("node_id", nodeID))
+
+	return nodeLoggerWithID, nil
+}
