@@ -95,18 +95,16 @@ func NewRaftServerWithLogger(clusterConfig ClusterConfig, logger *zap.Logger) *R
 
 // Put is a client side interface which is the main entry point for
 // log replication
-// TODO: add functionality to store the leader info
-func (r *Raft) Put(ctx context.Context, key, val []byte) error {
+func (r *Raft) Put(ctx context.Context, key, val []byte, requestID uint64) error {
 	r.n.meta.RLock()
 	isLeader := r.n.meta.nt == Leader
 	r.n.meta.RUnlock()
 
 	if !isLeader {
-		// TODO: Forward request to leader
 		return ErrNotALeader
 	}
 
-	return r.n.replicate(ctx, key, val)
+	return r.n.replicate(ctx, key, val, requestID)
 }
 
 // initializeCluster establishes connections to peer nodes

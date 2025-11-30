@@ -11,7 +11,6 @@ package raft
 import (
 	"context"
 	"errors"
-	"fmt"
 	"math/rand"
 
 	"sync"
@@ -35,6 +34,7 @@ type ConsensusState struct {
 	// pastVotes maps term numbers and candidate ids indicating which candidate
 	// this node voted for, for a given term
 	pastVotes map[int64]int64
+
 	sync.Mutex
 }
 
@@ -56,6 +56,7 @@ type Meta struct {
 	// for each server, index of highest log entry
 	// known to be replicated on server
 	matchIndex map[int]int64
+
 	sync.RWMutex
 }
 
@@ -146,11 +147,9 @@ func (n *raftNode) CommitIdx(idx int64) {
 
 	// Apply newly committed entries to the state machine
 	if idx > oldCommitIndex {
-		fmt.Println("debug 4")
 		n.applyc <- ToApply{
 			Entries: n.logManager.GetLogsAfter(oldCommitIndex),
 		}
-		fmt.Println("debug 5")
 	}
 }
 
@@ -315,37 +314,23 @@ func (n *raftNode) RequestVoteRPC(ctx context.Context, in *proto.RequestVote) (*
 
 // log replication
 // TODO: only allow leader to replicate, otherwise re-route request to it
-func (n *raftNode) replicate(ctx context.Context, key, val []byte) error {
+func (n *raftNode) replicate(ctx context.Context, key, val []byte, requestID uint64) error {
 	n.state.Lock()
 	currentTerm := n.state.currentTerm
 	n.state.Unlock()
 
 	logID := n.logManager.NextLogID()
 
-	n.logger.Debug("Starting log replication",
-		zap.String("component", "raft"),
-		zap.String("operation", "replication"),
-		zap.Int64("node_id", n.ID),
-		zap.String("key", string(key)),
-		zap.Int("value_size", len(val)),
-		zap.Int64("log_id", logID),
-		zap.Int64("term", currentTerm))
-
 	newlog := &proto.Log{
 		Term: currentTerm,
 		Id:   logID,
 		Data: &proto.Cmd{
-			Op:    "PUT",
-			Key:   string(key),
-			Value: string(val),
+			Op:        "PUT",
+			Key:       string(key),
+			Value:     string(val),
+			RequestId: requestID,
 		},
 	}
-
-	n.logger.Debug("Appending log entry to WAL",
-		zap.String("component", "raft"),
-		zap.String("operation", "replication"),
-		zap.Int64("node_id", n.ID),
-		zap.Int64("log_id", logID))
 
 	n.logManager.Append(newlog)
 
@@ -354,45 +339,14 @@ func (n *raftNode) replicate(ctx context.Context, key, val []byte) error {
 		peers = append(peers, k)
 	}
 
-	n.logger.Debug("Starting append entries to peers",
-		zap.String("component", "raft"),
-		zap.String("operation", "replication"),
-		zap.Int64("node_id", n.ID),
-		zap.Int64("log_id", logID),
-		zap.Int("peer_count", len(peers)))
-
 	replicationRounds := 0
 	for true {
 		var err error
 		replicationRounds++
 
-		n.logger.Debug("Sending append entries round",
-			zap.String("component", "raft"),
-			zap.String("operation", "replication"),
-			zap.Int64("node_id", n.ID),
-			zap.Int64("log_id", logID),
-			zap.Int("round", replicationRounds),
-			zap.Int("remaining_peers", len(peers)))
-
 		peers, err = n.sendAppendEntries(peers)
 		if peers == nil && err == nil {
-			n.logger.Debug("Append entries completed successfully",
-				zap.String("component", "raft"),
-				zap.String("operation", "replication"),
-				zap.Int64("node_id", n.ID),
-				zap.Int64("log_id", logID),
-				zap.Int("total_rounds", replicationRounds))
 			break
-		}
-
-		if err != nil {
-			n.logger.Debug("Append entries round failed, retrying",
-				zap.String("component", "raft"),
-				zap.String("operation", "replication"),
-				zap.Int64("node_id", n.ID),
-				zap.Int64("log_id", logID),
-				zap.Int("round", replicationRounds),
-				zap.Error(err))
 		}
 	}
 
@@ -411,23 +365,7 @@ func (n *raftNode) replicate(ctx context.Context, key, val []byte) error {
 
 	requiredReplicas := len(n.cluster)/2 + 1
 
-	n.logger.Debug("Checking replication status",
-		zap.String("component", "raft"),
-		zap.String("operation", "replication"),
-		zap.Int64("node_id", n.ID),
-		zap.Int64("log_id", logID),
-		zap.Int("successful_replicas", replStatus),
-		zap.Int("required_replicas", requiredReplicas),
-		zap.Int("total_peers", len(n.cluster)))
-
 	if replStatus >= requiredReplicas {
-		n.logger.Debug("Committing log entry - majority replication achieved",
-			zap.String("component", "raft"),
-			zap.String("operation", "replication"),
-			zap.Int64("node_id", n.ID),
-			zap.Int64("log_id", logID),
-			zap.Int("successful_replicas", replStatus))
-
 		// log has been successfully applied to the state machine,
 		// now commit this log.
 		n.CommitIdx(newlog.Id)
@@ -436,14 +374,6 @@ func (n *raftNode) replicate(ctx context.Context, key, val []byte) error {
 
 		return nil
 	}
-
-	n.logger.Debug("Replication failed - insufficient replicas",
-		zap.String("component", "raft"),
-		zap.String("operation", "replication"),
-		zap.Int64("node_id", n.ID),
-		zap.Int64("log_id", logID),
-		zap.Int("successful_replicas", replStatus),
-		zap.Int("required_replicas", requiredReplicas))
 
 	return ErrFailedToReplicate
 }
@@ -740,6 +670,10 @@ func (n *raftNode) sendHeartbeats() {
 
 func (r *Raft) GetLastAppliedLastCommitted() (int64, int64) {
 	return r.n.meta.lastAppliedToSM, r.n.meta.lastCommitIndex
+}
+
+func (r *Raft) GetLastApplied() int64 {
+	return r.n.meta.lastAppliedToSM
 }
 
 func (r *Raft) IncrementLastApplied() {

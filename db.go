@@ -29,9 +29,21 @@ type DB struct {
 	consensus  *raft.Raft
 	httpClient *http.Client
 	logger     *zap.Logger
+	scheduler  *fifoScheduler
+	waiter     Wait
+	applyWait  WaitTime
+	generator  *Generator
+	config     Config
 }
 
-func Open(raftPort int, httpPort int) (*DB, error) {
+type Config struct {
+	ProposalTimeout       time.Duration
+	LinearizedReadTimeout time.Duration
+}
+
+type DbOptions func(*Config)
+
+func Open(raftPort int, httpPort int, opts ...DbOptions) (*DB, error) {
 	nodeID := int64(1)
 	clusterConfig := raft.ClusterConfig{
 		ThisNodeID: nodeID,
@@ -45,10 +57,10 @@ func Open(raftPort int, httpPort int) (*DB, error) {
 		},
 	}
 
-	return OpenWithConfig(clusterConfig)
+	return OpenWithConfig(clusterConfig, opts...)
 }
 
-func OpenWithConfig(clusterConfig raft.ClusterConfig) (*DB, error) {
+func OpenWithConfig(clusterConfig raft.ClusterConfig, dbOptions ...DbOptions) (*DB, error) {
 	// Use node ID to create unique database file for each node
 	dbPath := fmt.Sprintf("harmony-%d.db", clusterConfig.ThisNodeID)
 
@@ -57,9 +69,25 @@ func OpenWithConfig(clusterConfig raft.ClusterConfig) (*DB, error) {
 		consensus:  raft.NewRaftServerWithConfig(clusterConfig),
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 		logger:     GetStructuredLogger("db"),
+		scheduler:  NewFifoScheduler(),
+		waiter:     newWaiter(),
+		applyWait:  newWaitTime(),
+		generator:  NewGenerator(uint16(clusterConfig.ThisNodeID), time.Now()),
 	}
 
-	go db.scheduler()
+	for _, opt := range dbOptions {
+		opt(&db.config)
+	}
+
+	if db.config.ProposalTimeout == 0 {
+		db.config.ProposalTimeout = 100 * time.Millisecond
+	}
+
+	if db.config.LinearizedReadTimeout == 0 {
+		db.config.LinearizedReadTimeout = 100 * time.Millisecond
+	}
+
+	go db.run()
 
 	return db, nil
 }
@@ -71,109 +99,102 @@ func generateCorrelationID() string {
 	return hex.EncodeToString(bytes)
 }
 
-func (db *DB) scheduler() {
-	db.logger.Debug("Starting database scheduler", zap.String("operation", "scheduler"))
-
-	for {
-		select {
-		// TODO: Make this channel a generic listener on the Db level
-		// so that the WAL implementation can use it.
-		// In the future we want to add a wal via which entries flow to
-		// the schedule which is a fifo queue and adds entries to the underlying
-		// kv storage
-		case d := <-db.consensus.Ready():
-			db.logger.Debug("Scheduler triggered - processing consensus entries",
-				zap.String("operation", "scheduler"),
-				zap.Int("entry_count", len(d.Entries)))
-
-			for i, log := range d.Entries {
-				start := time.Now()
-				if err := db.kv.put([]byte(log.Data.Key), []byte(log.Data.Value)); err != nil {
-					LogErrorWithContext(db.logger,
-						"Fatal error applying consensus entry - this should never happen", err,
-						zap.String("operation", "scheduler"),
-						zap.Int("entry_index", i),
-						zap.String("key", log.Data.Key),
-						zap.Int("value_size", len(log.Data.Value)),
-						DurationFromTime(start))
-					panic(fmt.Sprintf("put: should never panic: (%v)", err))
-				}
-
-				db.logger.Debug("Applied consensus entry successfully",
-					zap.String("operation", "scheduler"),
-					zap.Int("entry_index", i),
-					zap.String("key", log.Data.Key),
-					zap.Int("value_size", len(log.Data.Value)),
-					DurationFromTime(start))
-			}
-
-			db.logger.Debug("Completed processing all consensus entries",
-				zap.String("operation", "scheduler"))
+func (db *DB) applyCommittedEntries(entries *raft.ToApply) error {
+	for _, log := range entries.Entries {
+		// Apply to BTree
+		if err := db.kv.put([]byte(log.Data.Key), []byte(log.Data.Value)); err != nil {
+			panic(fmt.Sprintf("put: should never panic: (%v)", err))
 		}
-	}
-}
 
-func (db *DB) Put(key, val []byte) error {
-	correlationID := generateCorrelationID()
-	start := time.Now()
+		// State Machine Application
+		//
+		// increment last applied to indicate durability of the comitted entries
+		// in primary storage
+		db.consensus.IncrementLastApplied()
 
-	db.logger.Debug("Starting put operation",
-		zap.String("operation", "put"),
-		zap.String("key", string(key)),
-		zap.Int("value_size", len(val)),
-		CorrelationID(correlationID))
+		// Extract request ID and trigger the specific waiter
+		requestID := log.Data.RequestId
+		if requestID != 0 {
+			db.waiter.Trigger(requestID, nil)
+		}
 
-	if err := db.consensus.Put(context.TODO(), key, val); err != nil {
-		LogErrorWithContext(db.logger, "Put operation failed in consensus layer", err,
-			zap.String("operation", "put"),
-			zap.String("key", string(key)),
-			zap.Int("value_size", len(val)),
-			CorrelationID(correlationID),
-			DurationFromTime(start))
-		return fmt.Errorf("consensus: %w", err)
+		// Also trigger applied index wait for linearizable reads
+		db.applyWait.Trigger(log.Id)
 	}
 
-	db.logger.Debug("Put operation completed",
-		zap.String("operation", "put"),
-		zap.String("key", string(key)),
-		zap.Int("value_size", len(val)),
-		CorrelationID(correlationID),
-		DurationFromTime(start))
-
-	// The scheduler goroutine will apply committed entries from the Ready() channel
-	// No need to manually apply here - that's handled asynchronously by the scheduler
+	db.logger.Debug("Completed processing all consensus entries",
+		zap.String("operation", "applyConsensusEntries"))
 
 	return nil
 }
 
-func (db *DB) Get(key []byte) ([]byte, error) {
-	correlationID := generateCorrelationID()
-	start := time.Now()
+func (db *DB) run() {
+	for {
+		select {
+		case d := <-db.consensus.Ready():
+			newjob := newJob("consensus", func(ctx context.Context) {
+				db.applyCommittedEntries(&d)
+			})
 
-	db.logger.Debug("Starting get operation",
-		zap.String("operation", "get"),
-		zap.String("key", string(key)),
-		CorrelationID(correlationID))
+			db.scheduler.AddTask(newjob)
+		}
+	}
+}
 
-	value, err := db.kv.Get(key)
+func (db *DB) Put(ctx context.Context, key, val []byte) error {
+	// timeout for the proposal
+	mainCtx, cancel := context.WithTimeout(ctx, db.config.ProposalTimeout)
+	defer cancel()
 
-	if err != nil {
-		LogErrorWithContext(db.logger, "Get operation failed", err,
-			zap.String("operation", "get"),
-			zap.String("key", string(key)),
-			CorrelationID(correlationID),
-			DurationFromTime(start))
-		return nil, err
+	// generate a unique ID for the operation
+	id := db.generator.Next()
+	blockingChan := db.waiter.Register(id)
+
+	// propose the entry for consensus with request ID
+	if err := db.consensus.Put(mainCtx, key, val, id); err != nil {
+		return fmt.Errorf("consensus: %w", err)
 	}
 
-	db.logger.Debug("Get operation completed",
-		zap.String("operation", "get"),
-		zap.String("key", string(key)),
-		zap.Int("value_size", len(value)),
-		CorrelationID(correlationID),
-		DurationFromTime(start))
+	// to ensure linearizability we wait for the blocking channel to be closed
+	// indicating that the operation has been applied to the replicated
+	// state machine
+	//
+	// Q. Why not make consensus.Put() as blocking call? Ans: that breaks
+	// linearizability. The scheduler is a FIFO queue, so we need to ensure
+	// that the operation the current Put() is requesting is applied only
+	// when previously scheduled operations have been applied prior. This is
+	// how we ensure total order which in turn ensures linearizability.
+	select {
+	case <-blockingChan:
+		// operation has been applied
+		return nil
+	case <-mainCtx.Done():
+		return fmt.Errorf("put timeout: %w", mainCtx.Err())
+	}
+}
 
-	return value, nil
+func (db *DB) Get(ctx context.Context, key []byte) ([]byte, error) {
+	// timeout for the read
+	mainCtx, cancel := context.WithTimeout(ctx, db.config.ProposalTimeout)
+	defer cancel()
+
+	commitIdx := db.consensus.GetCommitIndex()
+
+	blockingRead := db.applyWait.Wait(commitIdx)
+
+	select {
+	case <-blockingRead:
+		value, err := db.kv.Get(key)
+
+		if err != nil {
+			return nil, fmt.Errorf("get: %w", err)
+		}
+
+		return value, nil
+	case <-mainCtx.Done():
+		return nil, fmt.Errorf("get timeout: %w", mainCtx.Err())
+	}
+
 }
 
 func (db *DB) GetLeaderID() int64 {

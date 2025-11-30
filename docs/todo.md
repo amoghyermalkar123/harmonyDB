@@ -20,9 +20,7 @@
 ### Phase 1: Core Distributed Features (High Impact)
 - [ ] **WAL Implementation** - Learn durability guarantees
   - Write-ahead logging for crash recovery
-  - Log replay mechanisms
-  - Durability vs performance tradeoffs
-  - design based on etcd
+  - Log replay mechanisms (recovery)
 - [ ] **Log Compaction** - Essential for any real Raft deployment
   - Snapshot creation and restoration
   - Log truncation logic
@@ -32,6 +30,16 @@
   - Split-brain prevention validation
   - Quorum-based operation testing
 
+### Phase 3: Performance & Scale
+- [ ] **Buffer Pool Management** - Critical for database performance
+  - LRU/Clock replacement policies
+  - Page pinning and unpinning
+  - Memory pressure handling
+- [ ] **Concurrent B+ Tree** - Learn about database concurrency
+  - Latch-based concurrency control
+  - Lock coupling strategies
+  - Read-write lock optimization
+  
 ### Phase 2: Transaction Support
 - [ ] **Basic Transactions with ACID Properties**
   - Begin/Commit/Rollback semantics
@@ -49,16 +57,6 @@
   - Different isolation levels implementation
   - Eventual consistency for read replicas
   - Linearizability guarantees
-
-### Phase 3: Performance & Scale
-- [ ] **Buffer Pool Management** - Critical for database performance
-  - LRU/Clock replacement policies
-  - Page pinning and unpinning
-  - Memory pressure handling
-- [ ] **Concurrent B+ Tree** - Learn about database concurrency
-  - Latch-based concurrency control
-  - Lock coupling strategies
-  - Read-write lock optimization
 
 ### Advanced Distributed Systems Features
 - [ ] **Partition Tolerance & Split-Brain Prevention**

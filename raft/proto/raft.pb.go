@@ -150,6 +150,7 @@ type AppendEntries struct {
 	// empty for heartbeat messages from leader to followers
 	Entries         []*Log `protobuf:"bytes,5,rep,name=entries,proto3" json:"entries,omitempty"`
 	LeaderCommitIdx int64  `protobuf:"varint,6,opt,name=leader_commit_idx,json=leaderCommitIdx,proto3" json:"leader_commit_idx,omitempty"`
+	Id              int64  `protobuf:"varint,7,opt,name=id,proto3" json:"id,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -226,6 +227,13 @@ func (x *AppendEntries) GetLeaderCommitIdx() int64 {
 	return 0
 }
 
+func (x *AppendEntries) GetId() int64 {
+	if x != nil {
+		return x.Id
+	}
+	return 0
+}
+
 type Log struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Term          int64                  `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`
@@ -291,6 +299,7 @@ type Cmd struct {
 	Op            string                 `protobuf:"bytes,1,opt,name=op,proto3" json:"op,omitempty"`
 	Key           string                 `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
 	Value         string                 `protobuf:"bytes,3,opt,name=value,proto3" json:"value,omitempty"`
+	RequestId     uint64                 `protobuf:"varint,4,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -344,6 +353,13 @@ func (x *Cmd) GetValue() string {
 		return x.Value
 	}
 	return ""
+}
+
+func (x *Cmd) GetRequestId() uint64 {
+	if x != nil {
+		return x.RequestId
+	}
+	return 0
 }
 
 type AppendEntriesResponse struct {
@@ -602,7 +618,7 @@ const file_raft_raft_proto_rawDesc = "" +
 	"\rlast_log_term\x18\x04 \x01(\x03R\vlastLogTerm\"L\n" +
 	"\x13RequestVoteResponse\x12\x12\n" +
 	"\x04term\x18\x01 \x01(\x03R\x04term\x12!\n" +
-	"\fvote_granted\x18\x02 \x01(\bR\vvoteGranted\"\xd7\x01\n" +
+	"\fvote_granted\x18\x02 \x01(\bR\vvoteGranted\"\xe7\x01\n" +
 	"\rAppendEntries\x12\x12\n" +
 	"\x04term\x18\x01 \x01(\x03R\x04term\x12\x1b\n" +
 	"\tleader_id\x18\x02 \x01(\x03R\bleaderId\x12 \n" +
@@ -610,15 +626,18 @@ const file_raft_raft_proto_rawDesc = "" +
 	"prevLogIdx\x12\"\n" +
 	"\rprev_log_term\x18\x04 \x01(\x03R\vprevLogTerm\x12#\n" +
 	"\aentries\x18\x05 \x03(\v2\t.raft.LogR\aentries\x12*\n" +
-	"\x11leader_commit_idx\x18\x06 \x01(\x03R\x0fleaderCommitIdx\"H\n" +
+	"\x11leader_commit_idx\x18\x06 \x01(\x03R\x0fleaderCommitIdx\x12\x0e\n" +
+	"\x02id\x18\a \x01(\x03R\x02id\"H\n" +
 	"\x03Log\x12\x12\n" +
 	"\x04term\x18\x01 \x01(\x03R\x04term\x12\x0e\n" +
 	"\x02id\x18\x02 \x01(\x03R\x02id\x12\x1d\n" +
-	"\x04data\x18\x03 \x01(\v2\t.raft.CmdR\x04data\"=\n" +
+	"\x04data\x18\x03 \x01(\v2\t.raft.CmdR\x04data\"\\\n" +
 	"\x03Cmd\x12\x0e\n" +
 	"\x02op\x18\x01 \x01(\tR\x02op\x12\x10\n" +
 	"\x03key\x18\x02 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x03 \x01(\tR\x05value\"T\n" +
+	"\x05value\x18\x03 \x01(\tR\x05value\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x04 \x01(\x04R\trequestId\"T\n" +
 	"\x15AppendEntriesResponse\x12!\n" +
 	"\fcurrent_term\x18\x01 \x01(\x03R\vcurrentTerm\x12\x18\n" +
 	"\asuccess\x18\x02 \x01(\bR\asuccess\"\x12\n" +

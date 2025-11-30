@@ -150,7 +150,7 @@ func (h *HTTPServer) handlePut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.db.Put([]byte(req.Key), []byte(req.Value)); err != nil {
+	if err := h.db.Put(r.Context(), []byte(req.Key), []byte(req.Value)); err != nil {
 		response := Response{Success: false, Error: err.Error()}
 
 		statusCode := http.StatusInternalServerError
@@ -221,7 +221,7 @@ func (h *HTTPServer) handleGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	val, err := h.db.Get([]byte(req.Key))
+	val, err := h.db.Get(r.Context(), []byte(req.Key))
 	if err != nil {
 		harmonydb.LogErrorWithContext(h.logger, "GET operation failed", err,
 			zap.String("operation", "get"),

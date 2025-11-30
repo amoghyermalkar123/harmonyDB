@@ -83,3 +83,9 @@ i realized that the database files weren't being created and since in the curren
 that in real environments as well, the consensus works much seperately than the underlying kv from a file perspective. Everything
 should go in the kv in order and something happens to the core durable file, everything is ruined. Hence it's better to have a WAL based
 file-backed persistence for raft to maintain totally ordered history incase the main engine is effed.
+
+[25/11] Understood what linearizability is and how it relates to raft. Linearizability is a consistency model that ensures that all operations appear to have happened in some sequential order. 
+In the context of Raft, linearizability ensures that all operations appear to have happened in the order they were proposed, even if they are executed asynchronously.
+Safety is ensured by not responding back to the client until an entry is durably committed to WAL, replicated to the nodes in the cluster via which we have received quorum and finally added to the primary
+durable KV storage engine.
+One of my very basic tests showed me this actually, it Put data and immediately tried to retrieve and it was failing. Previous tests didnt because they were adding sleeps between subsequent puts and gets and then i realized that the tests were doing incorrect assertions!
