@@ -5,7 +5,7 @@
 
 ## Not focus of this project:
 - Writing my own B+ Tree
-
+   - update: Welp, wrote my own
 
 Dev log [2025]:
 [26/9]: Decided that i was spending too much time focusing on low level details
