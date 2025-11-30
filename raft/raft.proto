@@ -25,6 +25,8 @@ message AppendEntries {
   repeated Log entries = 5;
 
   int64 leader_commit_idx = 6;
+
+  int64 id = 7;
 }
 
 message Log  {
@@ -37,6 +39,7 @@ message Cmd {
   string op = 1;
   string key = 2;
   string value = 3;
+  uint64 request_id = 4;
 }
 
 message AppendEntriesResponse {

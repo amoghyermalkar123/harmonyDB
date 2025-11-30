@@ -3,6 +3,8 @@ package harmonydb
 import (
 	"bytes"
 	"encoding/binary"
+
+	"go.uber.org/zap"
 )
 
 const pageSize = 4096
@@ -81,10 +83,12 @@ func (n *Node) split(newpg *Node) []byte {
 		// but they still take up space.
 		n.offsets = n.offsets[:splitpt]
 
+		separatorKey := newpg.leafCell[newpg.offsets[0]].key
+
 		// we return the first key of this leaf cell, this is used by the caller
 		// that works on internal node. The caller shall add this key to the internal
 		// node as a seperator key so that `newpg` is searchable in the btree
-		return newpg.leafCell[newpg.offsets[0]].key
+		return separatorKey
 	}
 
 	for i := splitpt; i < len(n.offsets); i++ {
@@ -95,7 +99,9 @@ func (n *Node) split(newpg *Node) []byte {
 
 	n.offsets = n.offsets[:splitpt]
 
-	return newpg.internalCell[newpg.offsets[0]].key
+	separatorKey := newpg.internalCell[newpg.offsets[0]].key
+
+	return separatorKey
 }
 
 func (n *Node) isFull() bool {
@@ -137,6 +143,16 @@ func (n *Node) appendLeafCell(key []byte, value []byte) {
 		key:     key,
 		val:     value,
 	})
+
+	// Use GetLogger if available for debug logging
+	if logger := GetLogger(); logger != nil {
+		logger.Debug("Appended leaf cell to page",
+			zap.String("operation", "page_operation"),
+			zap.Uint64("page_offset", n.fileOffset),
+			zap.String("key", string(key)),
+			zap.Int("value_size", len(value)),
+			zap.Int("total_cells", len(n.offsets)))
+	}
 }
 
 func (n *Node) insertLeafCell(offset uint16, key []byte, value []byte) {
@@ -153,6 +169,17 @@ func (n *Node) insertLeafCell(offset uint16, key []byte, value []byte) {
 		key:     key,
 		val:     value,
 	})
+
+	// Use GetLogger if available for debug logging
+	if logger := GetLogger(); logger != nil {
+		logger.Debug("Inserted leaf cell into page",
+			zap.String("operation", "page_operation"),
+			zap.Uint64("page_offset", n.fileOffset),
+			zap.String("key", string(key)),
+			zap.Int("value_size", len(value)),
+			zap.Uint16("insertion_offset", offset),
+			zap.Int("total_cells", len(n.offsets)))
+	}
 }
 
 func (n *Node) cellKey(offset uint16) []byte {
@@ -169,7 +196,7 @@ func (n *Node) findInsPointForKey(key []byte) uint16 {
 
 	for low <= high {
 		mid := low + (high-low)/2
-		k := n.cellKey(uint16(mid))
+		k := n.cellKey(n.offsets[mid])
 		if bytes.Compare(key, k) == -1 {
 			high = mid - 1
 		} else if bytes.Compare(key, k) == 1 {

@@ -32,8 +32,11 @@ func NewRaftServerWithConfig(clusterConfig ClusterConfig) *Raft {
 		panic(fmt.Sprintf("Configuration for node ID %d not found", clusterConfig.ThisNodeID))
 	}
 
+	// Use the global logger as default
+	nodeLogger := getLogger()
+
 	r := &Raft{
-		n:      newRaftNode(),
+		n:      newRaftNode(nodeLogger),
 		config: clusterConfig,
 	}
 
@@ -47,7 +50,40 @@ func NewRaftServerWithConfig(clusterConfig ClusterConfig) *Raft {
 	go r.startWithPort(thisNodeConfig.RaftPort)
 	go r.n.startElection()
 
-	getLogger().Info("Started Raft server with static configuration",
+	r.n.logger.Info("Started Raft server with static configuration",
+		zap.String("component", "raft"),
+		zap.Int64("node_id", r.n.ID),
+		zap.Int("raft_port", thisNodeConfig.RaftPort),
+		zap.Int("http_port", thisNodeConfig.HTTPPort),
+		zap.Int("cluster_size", len(clusterConfig.Nodes)))
+
+	return r
+}
+
+// NewRaftServerWithLogger creates a new Raft server with custom logger (for testing)
+func NewRaftServerWithLogger(clusterConfig ClusterConfig, logger *zap.Logger) *Raft {
+	// Find this node's configuration
+	thisNodeConfig, exists := clusterConfig.Nodes[clusterConfig.ThisNodeID]
+	if !exists {
+		panic(fmt.Sprintf("Configuration for node ID %d not found", clusterConfig.ThisNodeID))
+	}
+
+	r := &Raft{
+		n:      newRaftNode(logger),
+		config: clusterConfig,
+	}
+
+	// Set the node ID to match configuration
+	r.n.ID = clusterConfig.ThisNodeID
+
+	// Initialize cluster connections
+	r.initializeCluster()
+
+	// Start Raft server
+	go r.startWithPort(thisNodeConfig.RaftPort)
+	go r.n.startElection()
+
+	logger.Info("Started Raft server with custom logger",
 		zap.String("component", "raft"),
 		zap.Int64("node_id", r.n.ID),
 		zap.Int("raft_port", thisNodeConfig.RaftPort),
@@ -59,17 +95,16 @@ func NewRaftServerWithConfig(clusterConfig ClusterConfig) *Raft {
 
 // Put is a client side interface which is the main entry point for
 // log replication
-// TODO: add functionality to store the leader info
-func (r *Raft) Put(ctx context.Context, key, val []byte) error {
+func (r *Raft) Put(ctx context.Context, key, val []byte, requestID uint64) error {
 	r.n.meta.RLock()
 	isLeader := r.n.meta.nt == Leader
 	r.n.meta.RUnlock()
 
 	if !isLeader {
-		// TODO: Forward request to leader
 		return ErrNotALeader
 	}
-	return r.n.replicate(ctx, key, val)
+
+	return r.n.replicate(ctx, key, val, requestID)
 }
 
 // initializeCluster establishes connections to peer nodes
@@ -85,7 +120,7 @@ func (r *Raft) initializeCluster() {
 		address := fmt.Sprintf("%s:%d", nodeConfig.Address, nodeConfig.RaftPort)
 		conn, err := grpc.Dial(address, grpc.WithInsecure())
 		if err != nil {
-			getLogger().Warn("Failed to connect to peer",
+			r.n.logger.Warn("Failed to connect to peer",
 				zap.String("component", "raft"),
 				zap.Int64("peer_id", nodeID),
 				zap.String("address", address),
@@ -96,13 +131,15 @@ func (r *Raft) initializeCluster() {
 		client := proto.NewRaftClient(conn)
 		cluster[nodeID] = client
 
-		getLogger().Info("Connected to peer",
+		r.n.logger.Info("Connected to peer",
 			zap.String("component", "raft"),
 			zap.Int64("peer_id", nodeID),
 			zap.String("address", address))
 	}
 
 	r.n.Lock()
+	defer r.n.Unlock()
+
 	r.n.cluster = cluster
 
 	// Initialize nextIndex for all peers
@@ -112,9 +149,8 @@ func (r *Raft) initializeCluster() {
 			r.n.nextIndex[peerID] = 1
 		}
 	}
-	r.n.Unlock()
 
-	getLogger().Info("Cluster initialization complete",
+	r.n.logger.Info("Cluster initialization complete",
 		zap.String("component", "raft"),
 		zap.Int("peer_count", len(cluster)))
 }
@@ -126,10 +162,10 @@ func (r *Raft) startWithPort(port int) {
 
 	lis, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", port))
 	if err != nil {
-		getLogger().Fatal("Failed to listen on port", zap.String("component", "raft"), zap.Int("port", port), zap.Error(err))
+		r.n.logger.Fatal("Failed to listen on port", zap.String("component", "raft"), zap.Int("port", port), zap.Error(err))
 	}
 
-	getLogger().Info("Raft server listening", zap.String("component", "raft"), zap.Int("port", port))
+	r.n.logger.Info("Raft server listening", zap.String("component", "raft"), zap.Int("port", port))
 	r.server.Serve(lis)
 }
 
@@ -172,7 +208,7 @@ func (r *Raft) GetConfig() ClusterConfig {
 // Stop immediately shuts down the Raft server (for testing/partition simulation)
 func (r *Raft) Stop() {
 	if r.server != nil {
-		getLogger().Info("Stopping Raft server", zap.String("component", "raft"))
+		r.n.logger.Info("Stopping Raft server", zap.String("component", "raft"))
 		r.server.Stop() // Immediate stop, not graceful
 	}
 }
