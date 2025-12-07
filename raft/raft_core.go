@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"math/rand"
+	"strconv"
 
 	"sync"
 	"time"
@@ -116,9 +117,9 @@ type raftNode struct {
 	sync.RWMutex
 }
 
-func newRaftNode(logger *zap.Logger) *raftNode {
-	return &raftNode{
-		ID: generateNodeID(),
+func newRaftNode(nodeID int64, logger *zap.Logger) *raftNode {
+	r := &raftNode{
+		ID: nodeID,
 		meta: &Meta{
 			nt:         Follower,
 			nextIndex:  make(map[int]int64),
@@ -128,7 +129,6 @@ func newRaftNode(logger *zap.Logger) *raftNode {
 			votedFor:  0,
 			pastVotes: make(map[int64]int64),
 		},
-		logManager: wal.NewLM(),
 		cluster:    make(map[int64]proto.RaftClient),
 		heartbeats: make(chan *proto.AppendEntries),
 		applyc:     make(chan ToApply),
@@ -137,6 +137,10 @@ func newRaftNode(logger *zap.Logger) *raftNode {
 		nextIndex:  make(map[int64]int64),
 		logger:     logger,
 	}
+
+	r.logManager = wal.NewLM("/tmp/members/" + strconv.FormatInt(r.ID, 10))
+
+	return r
 }
 
 func (n *raftNode) CommitIdx(idx int64) {
@@ -350,7 +354,7 @@ func (n *raftNode) replicate(ctx context.Context, key, val []byte, requestID uin
 		}
 	}
 
-	replStatus := 0
+	replStatus := 1
 	peerStatuses := make(map[int64]bool)
 
 	for peer := range n.cluster {

@@ -55,7 +55,7 @@ I need to plan everyday with clear actions so that I progress each day, instead 
 [11/11] Had this idea where shapes of data are replicated differently. One shape of data is always strongly
 replicated and other shape of data is always eventually replicated.
 
-[12/11] Facing issues witht testing my database beyond the basic local testing and unit tests. Tried researching
+[12/11] Facing issues with testing my database beyond the basic local testing and unit tests. Tried researching
 how actual DB's do it but all i can find is jepsen. But it's a steep journey because then I would have to learn
 clojure. For which I just don't have any time right now. For now I am going to check a bit in depth if i can find
 what etcd and cockroach db do.
@@ -89,3 +89,13 @@ In the context of Raft, linearizability ensures that all operations appear to ha
 Safety is ensured by not responding back to the client until an entry is durably committed to WAL, replicated to the nodes in the cluster via which we have received quorum and finally added to the primary
 durable KV storage engine.
 One of my very basic tests showed me this actually, it Put data and immediately tried to retrieve and it was failing. Previous tests didnt because they were adding sleeps between subsequent puts and gets and then i realized that the tests were doing incorrect assertions!
+
+[2/12] Was working on recovery based on WAL trying to figure out how at bootup post crash recovery do we actually build the in-memory
+wal based on what we wrote in the file post crash. the problem is what exactly to load. which operations do you load? then i found the answer is simple. use the last applied index, but then even this needs to be persisted before crash. not long after that i realized we also need to re-build the in memory b+tree. So now i am thinking what all metadata we will need to constantly store right before a crash. Also, since every file write is in OS's buffer, how do you make the decision about when to call fsync()?
+on one hand it seems safe and in-line with the acid rule, but on the other hand i cant imagine calling fsync for every KV might be the most performance optimal - so you would want to batch some calls then call fsync()? for better write throughput?
+
+for which entries do you decide you want to load the b+tree for? only left to be applied right? but that does not seem optimal. also does not seem right because you also want to serve queries. I guess you load pages? but which ones? wait, it seems obvious to load all pages in-memory lol, atleast for now because this is a toy db.
+
+just realized i cannot implement mmap for my database. i would need a buffer pool manager as the database is not embedded. plus i will need to integrate this in recovery mechanisms and would also need an LRU for the same.
+
+[3/11] slpt: when developing a database in it's early stages, don't work on the decode path. only work on the encode path. this will make sure that as the db evolves incrementally, you can focus on building it bottom to top and are free to make changes with enough flexibility because the file format is flexible. since the decode path is not there it will just create additional data in a file and after restarts or between tests the previously persisted data will not be accessible in the next run, but atleast you are free to change the file format.

@@ -54,9 +54,10 @@ func (c *cache) all() map[int64]*Node {
 }
 
 type fileStore struct {
-	file           *os.File
-	lock           sync.Mutex
-	cache          *cache
+	file *os.File
+	lock sync.Mutex
+	// TODO: replace pageCache with buffer pool manager + lru
+	pageCache      *cache
 	nextFreeOffset uint64
 	rootOffset     uint64
 }
@@ -68,8 +69,8 @@ func newFileStore(path string) (*fileStore, error) {
 	}
 
 	f := &fileStore{
-		file:  file,
-		cache: &cache{nodes: make(map[int64]*Node)},
+		file:      file,
+		pageCache: &cache{nodes: make(map[int64]*Node)},
 	}
 
 	go func() {
@@ -99,7 +100,7 @@ func (f *fileStore) flushPages() error {
 	f.lock.Lock()
 	defer f.lock.Unlock()
 
-	for _, page := range f.cache.nodes {
+	for _, page := range f.pageCache.nodes {
 		if !page.isDirty {
 			continue
 		}
@@ -130,10 +131,10 @@ func (f *fileStore) update(node *Node) error {
 		return fmt.Errorf("sync: %w", err)
 	}
 
-	f.cache.Lock()
-	defer f.cache.Unlock()
+	f.pageCache.Lock()
+	defer f.pageCache.Unlock()
 
-	f.cache.nodes[int64(node.fileOffset)] = node
+	f.pageCache.nodes[int64(node.fileOffset)] = node
 
 	return nil
 }

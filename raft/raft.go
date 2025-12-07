@@ -36,12 +36,9 @@ func NewRaftServerWithConfig(clusterConfig ClusterConfig) *Raft {
 	nodeLogger := getLogger()
 
 	r := &Raft{
-		n:      newRaftNode(nodeLogger),
+		n:      newRaftNode(clusterConfig.ThisNodeID, nodeLogger),
 		config: clusterConfig,
 	}
-
-	// Set the node ID to match configuration
-	r.n.ID = clusterConfig.ThisNodeID
 
 	// Initialize cluster connections
 	r.initializeCluster()
@@ -69,12 +66,9 @@ func NewRaftServerWithLogger(clusterConfig ClusterConfig, logger *zap.Logger) *R
 	}
 
 	r := &Raft{
-		n:      newRaftNode(logger),
+		n:      newRaftNode(clusterConfig.ThisNodeID, logger),
 		config: clusterConfig,
 	}
-
-	// Set the node ID to match configuration
-	r.n.ID = clusterConfig.ThisNodeID
 
 	// Initialize cluster connections
 	r.initializeCluster()
@@ -227,7 +221,24 @@ func (r *Raft) GetCommitIndex() int64 {
 	return r.n.meta.lastCommitIndex
 }
 
+// SetCommitIndex sets the commit index (used during WAL recovery)
+// This directly sets the value without triggering apply logic
+func (r *Raft) SetCommitIndex(idx int64) {
+	r.n.meta.Lock()
+	r.n.meta.lastCommitIndex = idx
+	r.n.meta.Unlock()
+}
+
 // GetLogEntry returns a log entry at a specific index
 func (r *Raft) GetLogEntry(index int) *proto.Log {
 	return r.n.logManager.GetLog(index)
+}
+
+func (n *Raft) GetLogsAfter(idx int64) []*proto.Log {
+	return n.n.logManager.GetLogsAfter(idx)
+}
+
+// GetLastLogID returns the ID of the last log entry in the WAL
+func (r *Raft) GetLastLogID() int64 {
+	return r.n.logManager.GetLastLogID()
 }

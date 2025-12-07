@@ -3,291 +3,509 @@ package harmonydb
 import (
 	"bytes"
 	"testing"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
-func TestNodeCreation(t *testing.T) {
-	t.Run("create leaf node", func(t *testing.T) {
-		node := &Node{isLeaf: true}
-		assert.True(t, node.isLeaf)
-		assert.Equal(t, uint64(0), node.fileOffset)
-	})
+func TestLeafNodeEncodeDecodeRoundtrip(t *testing.T) {
+	node := &Node{
+		isLeaf:  true,
+		offsets: []uint16{},
+	}
 
-	t.Run("create internal node", func(t *testing.T) {
-		node := &Node{isLeaf: false}
-		assert.False(t, node.isLeaf)
-	})
-}
+	testCases := []struct {
+		key []byte
+		val []byte
+	}{
+		{[]byte("key1"), []byte("value1")},
+		{[]byte("key2"), []byte("value2")},
+		{[]byte("key3"), []byte("value3")},
+		{[]byte("apple"), []byte("red fruit")},
+		{[]byte("banana"), []byte("yellow fruit")},
+	}
 
-func TestSetFileOffset(t *testing.T) {
-	node := &Node{isLeaf: true}
-	node.setFileOffsetForNode(42)
-	assert.Equal(t, uint64(42), node.fileOffset)
-}
+	for _, tc := range testCases {
+		node.appendLeafCell(tc.key, tc.val)
+	}
 
-func TestLeafCellOperations(t *testing.T) {
-	t.Run("insert at end", func(t *testing.T) {
-		node := &Node{isLeaf: true}
-		node.insertLeafCell(0, []byte("key1"), []byte("value1"))
+	t.Logf("Before encoding: node has %d offsets and %d leaf cells", len(node.offsets), len(node.leafCell))
 
-		cell := node.findLeafCell([]byte("key1"))
-		require.NotNil(t, cell)
-		assert.Equal(t, []byte("value1"), cell.val)
-	})
+	encoded, err := node.encodeLeaf()
+	if err != nil {
+		t.Fatalf("Failed to encode leaf node: %v", err)
+	}
 
-	t.Run("insert multiple cells", func(t *testing.T) {
-		node := &Node{isLeaf: true}
-		node.insertLeafCell(0, []byte("a"), []byte("val_a"))
-		node.insertLeafCell(1, []byte("c"), []byte("val_c"))
-		node.insertLeafCell(1, []byte("b"), []byte("val_b"))
+	if len(encoded) != pageSize {
+		t.Fatalf("Encoded leaf node size is %d, expected %d", len(encoded), pageSize)
+	}
 
-		assert.Len(t, node.offsets, 3)
-		assert.Len(t, node.leafCell, 3)
-	})
+	t.Logf("Encoded first 20 bytes: %v", encoded[:20])
 
-	t.Run("find existing cell", func(t *testing.T) {
-		node := &Node{isLeaf: true}
-		node.insertLeafCell(0, []byte("test"), []byte("data"))
+	decodedNode := &Node{}
+	if err := decodedNode.decode(encoded); err != nil {
+		t.Fatalf("Failed to decode leaf node: %v", err)
+	}
 
-		cell := node.findLeafCell([]byte("test"))
-		require.NotNil(t, cell)
-		assert.Equal(t, []byte("data"), cell.val)
-		assert.Equal(t, uint32(4), cell.keySize)
-		assert.Equal(t, uint32(4), cell.valSize)
-	})
+	t.Logf("After decoding: node has %d offsets and %d leaf cells", len(decodedNode.offsets), len(decodedNode.leafCell))
 
-	t.Run("find non-existing cell", func(t *testing.T) {
-		node := &Node{isLeaf: true}
-		node.insertLeafCell(0, []byte("test"), []byte("data"))
+	if !decodedNode.isLeaf {
+		t.Errorf("Decoded node is not a leaf node")
+	}
 
-		cell := node.findLeafCell([]byte("missing"))
-		assert.Nil(t, cell)
-	})
+	if len(decodedNode.offsets) != len(node.offsets) {
+		t.Fatalf("Decoded node has %d offsets, expected %d", len(decodedNode.offsets), len(node.offsets))
+	}
 
-	t.Run("empty key and value", func(t *testing.T) {
-		node := &Node{isLeaf: true}
-		node.insertLeafCell(0, []byte(""), []byte(""))
+	if len(decodedNode.leafCell) != len(node.leafCell) {
+		t.Fatalf("Decoded node has %d leaf cells, expected %d", len(decodedNode.leafCell), len(node.leafCell))
+	}
 
-		cell := node.findLeafCell([]byte(""))
-		require.NotNil(t, cell)
-		assert.Equal(t, []byte(""), cell.val)
-		assert.Equal(t, uint32(0), cell.keySize)
-		assert.Equal(t, uint32(0), cell.valSize)
-	})
+	for i := range node.offsets {
+		origIdx := node.offsets[i]
+		decodedIdx := decodedNode.offsets[i]
 
-	t.Run("large key and value", func(t *testing.T) {
-		node := &Node{isLeaf: true}
-		largeKey := bytes.Repeat([]byte("k"), 200)
-		largeVal := bytes.Repeat([]byte("v"), 2000)
+		origCell := node.leafCell[origIdx]
+		decodedCell := decodedNode.leafCell[decodedIdx]
 
-		node.insertLeafCell(0, largeKey, largeVal)
-
-		cell := node.findLeafCell(largeKey)
-		require.NotNil(t, cell)
-		assert.Equal(t, largeVal, cell.val)
-		assert.Equal(t, uint32(200), cell.keySize)
-		assert.Equal(t, uint32(2000), cell.valSize)
-	})
-}
-
-func TestInternalCellOperations(t *testing.T) {
-	t.Run("append internal cell", func(t *testing.T) {
-		node := &Node{isLeaf: false}
-		node.appendInternalCell(10, []byte("separator"))
-
-		assert.Len(t, node.internalCell, 1)
-		assert.Equal(t, uint64(10), node.internalCell[0].fileOffset)
-		assert.Equal(t, []byte("separator"), node.internalCell[0].key)
-	})
-
-	t.Run("insert internal cell at position", func(t *testing.T) {
-		node := &Node{isLeaf: false}
-		node.appendInternalCell(10, []byte("a"))
-		node.appendInternalCell(30, []byte("c"))
-		node.insertInternalCell(1, 20, []byte("b"))
-
-		assert.Len(t, node.internalCell, 3)
-		assert.Len(t, node.offsets, 3)
-	})
-
-	t.Run("multiple internal cells", func(t *testing.T) {
-		node := &Node{isLeaf: false}
-		for i := 0; i < 5; i++ {
-			node.appendInternalCell(uint64(i*10), []byte{byte('a' + i)})
+		if origCell.keySize != decodedCell.keySize {
+			t.Errorf("Cell %d: keySize mismatch, got %d, expected %d", i, decodedCell.keySize, origCell.keySize)
 		}
 
-		assert.Len(t, node.internalCell, 5)
-	})
+		if origCell.valSize != decodedCell.valSize {
+			t.Errorf("Cell %d: valSize mismatch, got %d, expected %d", i, decodedCell.valSize, origCell.valSize)
+		}
+
+		if !bytes.Equal(origCell.key, decodedCell.key) {
+			t.Errorf("Cell %d: key mismatch, got %s, expected %s", i, decodedCell.key, origCell.key)
+		}
+
+		if !bytes.Equal(origCell.val, decodedCell.val) {
+			t.Errorf("Cell %d: val mismatch, got %s, expected %s", i, decodedCell.val, origCell.val)
+		}
+	}
+}
+
+func TestInternalNodeEncodeDecodeRoundtrip(t *testing.T) {
+	node := &Node{
+		isLeaf:     false,
+		fileOffset: 8192,
+		offsets:    []uint16{},
+	}
+
+	testCases := []struct {
+		key        []byte
+		fileOffset uint64
+	}{
+		{[]byte("key1"), 4096},
+		{[]byte("key2"), 8192},
+		{[]byte("key3"), 12288},
+		{[]byte("apple"), 16384},
+		{[]byte("banana"), 20480},
+	}
+
+	for _, tc := range testCases {
+		node.appendInternalCell(tc.fileOffset, tc.key)
+	}
+
+	encoded, err := node.encodeInternal()
+	if err != nil {
+		t.Fatalf("Failed to encode internal node: %v", err)
+	}
+
+	if len(encoded) != pageSize {
+		t.Fatalf("Encoded internal node size is %d, expected %d", len(encoded), pageSize)
+	}
+
+	decodedNode := &Node{}
+	if err := decodedNode.decode(encoded); err != nil {
+		t.Fatalf("Failed to decode internal node: %v", err)
+	}
+
+	if decodedNode.isLeaf {
+		t.Errorf("Decoded node is a leaf node, expected internal")
+	}
+
+	if decodedNode.fileOffset != node.fileOffset {
+		t.Errorf("Decoded node fileOffset is %d, expected %d", decodedNode.fileOffset, node.fileOffset)
+	}
+
+	if len(decodedNode.offsets) != len(node.offsets) {
+		t.Fatalf("Decoded node has %d offsets, expected %d", len(decodedNode.offsets), len(node.offsets))
+	}
+
+	if len(decodedNode.internalCell) != len(node.internalCell) {
+		t.Fatalf("Decoded node has %d internal cells, expected %d", len(decodedNode.internalCell), len(node.internalCell))
+	}
+
+	for i := range node.offsets {
+		origIdx := node.offsets[i]
+		decodedIdx := decodedNode.offsets[i]
+
+		origCell := node.internalCell[origIdx]
+		decodedCell := decodedNode.internalCell[decodedIdx]
+
+		if !bytes.Equal(origCell.key, decodedCell.key) {
+			t.Errorf("Cell %d: key mismatch, got %s, expected %s", i, decodedCell.key, origCell.key)
+		}
+
+		if origCell.fileOffset != decodedCell.fileOffset {
+			t.Errorf("Cell %d: fileOffset mismatch, got %d, expected %d", i, decodedCell.fileOffset, origCell.fileOffset)
+		}
+	}
+}
+
+func TestLeafNodeAppendCell(t *testing.T) {
+	node := &Node{
+		isLeaf:  true,
+		offsets: []uint16{},
+	}
+
+	key1 := []byte("key1")
+	val1 := []byte("value1")
+	node.appendLeafCell(key1, val1)
+
+	if len(node.offsets) != 1 {
+		t.Fatalf("Expected 1 offset, got %d", len(node.offsets))
+	}
+
+	if len(node.leafCell) != 1 {
+		t.Fatalf("Expected 1 leaf cell, got %d", len(node.leafCell))
+	}
+
+	cell := node.leafCell[node.offsets[0]]
+	if !bytes.Equal(cell.key, key1) {
+		t.Errorf("Key mismatch, got %s, expected %s", cell.key, key1)
+	}
+
+	if !bytes.Equal(cell.val, val1) {
+		t.Errorf("Value mismatch, got %s, expected %s", cell.val, val1)
+	}
+
+	key2 := []byte("key2")
+	val2 := []byte("value2")
+	node.appendLeafCell(key2, val2)
+
+	if len(node.offsets) != 2 {
+		t.Fatalf("Expected 2 offsets, got %d", len(node.offsets))
+	}
+
+	if len(node.leafCell) != 2 {
+		t.Fatalf("Expected 2 leaf cells, got %d", len(node.leafCell))
+	}
+}
+
+func TestLeafNodeInsertCell(t *testing.T) {
+	node := &Node{
+		isLeaf:  true,
+		offsets: []uint16{},
+	}
+
+	node.appendLeafCell([]byte("key1"), []byte("value1"))
+	node.appendLeafCell([]byte("key3"), []byte("value3"))
+
+	node.insertLeafCell(1, []byte("key2"), []byte("value2"))
+
+	if len(node.offsets) != 3 {
+		t.Fatalf("Expected 3 offsets, got %d", len(node.offsets))
+	}
+
+	if len(node.leafCell) != 3 {
+		t.Fatalf("Expected 3 leaf cells, got %d", len(node.leafCell))
+	}
+
+	if !bytes.Equal(node.leafCell[node.offsets[0]].key, []byte("key1")) {
+		t.Errorf("First key should be key1, got %s", node.leafCell[node.offsets[0]].key)
+	}
+
+	if !bytes.Equal(node.leafCell[node.offsets[1]].key, []byte("key2")) {
+		t.Errorf("Second key should be key2, got %s", node.leafCell[node.offsets[1]].key)
+	}
+
+	if !bytes.Equal(node.leafCell[node.offsets[2]].key, []byte("key3")) {
+		t.Errorf("Third key should be key3, got %s", node.leafCell[node.offsets[2]].key)
+	}
+}
+
+func TestInternalNodeAppendCell(t *testing.T) {
+	node := &Node{
+		isLeaf:  false,
+		offsets: []uint16{},
+	}
+
+	key1 := []byte("key1")
+	offset1 := uint64(4096)
+	node.appendInternalCell(offset1, key1)
+
+	if len(node.offsets) != 1 {
+		t.Fatalf("Expected 1 offset, got %d", len(node.offsets))
+	}
+
+	if len(node.internalCell) != 1 {
+		t.Fatalf("Expected 1 internal cell, got %d", len(node.internalCell))
+	}
+
+	cell := node.internalCell[node.offsets[0]]
+	if !bytes.Equal(cell.key, key1) {
+		t.Errorf("Key mismatch, got %s, expected %s", cell.key, key1)
+	}
+
+	if cell.fileOffset != offset1 {
+		t.Errorf("FileOffset mismatch, got %d, expected %d", cell.fileOffset, offset1)
+	}
+
+	key2 := []byte("key2")
+	offset2 := uint64(8192)
+	node.appendInternalCell(offset2, key2)
+
+	if len(node.offsets) != 2 {
+		t.Fatalf("Expected 2 offsets, got %d", len(node.offsets))
+	}
+
+	if len(node.internalCell) != 2 {
+		t.Fatalf("Expected 2 internal cells, got %d", len(node.internalCell))
+	}
+}
+
+func TestInternalNodeInsertCell(t *testing.T) {
+	node := &Node{
+		isLeaf:  false,
+		offsets: []uint16{},
+	}
+
+	node.appendInternalCell(4096, []byte("key1"))
+	node.appendInternalCell(12288, []byte("key3"))
+
+	node.insertInternalCell(1, 8192, []byte("key2"))
+
+	if len(node.offsets) != 3 {
+		t.Fatalf("Expected 3 offsets, got %d", len(node.offsets))
+	}
+
+	if len(node.internalCell) != 3 {
+		t.Fatalf("Expected 3 internal cells, got %d", len(node.internalCell))
+	}
+
+	if !bytes.Equal(node.internalCell[node.offsets[0]].key, []byte("key1")) {
+		t.Errorf("First key should be key1, got %s", node.internalCell[node.offsets[0]].key)
+	}
+
+	if !bytes.Equal(node.internalCell[node.offsets[1]].key, []byte("key2")) {
+		t.Errorf("Second key should be key2, got %s", node.internalCell[node.offsets[1]].key)
+	}
+
+	if !bytes.Equal(node.internalCell[node.offsets[2]].key, []byte("key3")) {
+		t.Errorf("Third key should be key3, got %s", node.internalCell[node.offsets[2]].key)
+	}
+}
+
+func TestFindInsPointForKey(t *testing.T) {
+	node := &Node{
+		isLeaf:  true,
+		offsets: []uint16{},
+	}
+
+	node.appendLeafCell([]byte("apple"), []byte("red"))
+	node.appendLeafCell([]byte("grape"), []byte("purple"))
+	node.appendLeafCell([]byte("orange"), []byte("orange"))
+
+	tests := []struct {
+		key              []byte
+		expectedPosition uint16
+	}{
+		{[]byte("banana"), 1},
+		{[]byte("apple"), 0},
+		{[]byte("grape"), 1},
+		{[]byte("zebra"), 3},
+		{[]byte("aardvark"), 0},
+		{[]byte("mango"), 2},
+	}
+
+	for _, tc := range tests {
+		pos := node.findInsPointForKey(tc.key)
+		if pos != tc.expectedPosition {
+			t.Errorf("findInsPointForKey(%s) = %d, expected %d", tc.key, pos, tc.expectedPosition)
+		}
+	}
+}
+
+func TestFindChildPage(t *testing.T) {
+	node := &Node{
+		isLeaf:  false,
+		offsets: []uint16{},
+	}
+
+	node.appendInternalCell(4096, []byte("apple"))
+	node.appendInternalCell(8192, []byte("grape"))
+	node.appendInternalCell(12288, []byte("orange"))
+
+	tests := []struct {
+		key            []byte
+		expectedOffset uint16
+	}{
+		{[]byte("banana"), 0},
+		{[]byte("apple"), 0},
+		{[]byte("grape"), 1},
+		{[]byte("zebra"), 2},
+		{[]byte("aardvark"), 0},
+		{[]byte("mango"), 1},
+		{[]byte("orange"), 2},
+		{[]byte("peach"), 2},
+	}
+
+	for _, tc := range tests {
+		offset := node.findChildPage(tc.key)
+		if offset != tc.expectedOffset {
+			t.Errorf("findChildPage(%s) = %d, expected %d", tc.key, offset, tc.expectedOffset)
+		}
+	}
+}
+
+func TestFindLeafCell(t *testing.T) {
+	node := &Node{
+		isLeaf:  true,
+		offsets: []uint16{},
+	}
+
+	node.appendLeafCell([]byte("apple"), []byte("red"))
+	node.appendLeafCell([]byte("banana"), []byte("yellow"))
+	node.appendLeafCell([]byte("grape"), []byte("purple"))
+
+	cell := node.findLeafCell([]byte("banana"))
+	if cell == nil {
+		t.Fatal("Expected to find cell for 'banana', got nil")
+	}
+
+	if !bytes.Equal(cell.key, []byte("banana")) {
+		t.Errorf("Found cell key is %s, expected 'banana'", cell.key)
+	}
+
+	if !bytes.Equal(cell.val, []byte("yellow")) {
+		t.Errorf("Found cell value is %s, expected 'yellow'", cell.val)
+	}
+
+	notFound := node.findLeafCell([]byte("notexist"))
+	if notFound != nil {
+		t.Errorf("Expected nil for non-existent key, got %v", notFound)
+	}
 }
 
 func TestCellKey(t *testing.T) {
-	t.Run("leaf cell key", func(t *testing.T) {
-		node := &Node{isLeaf: true}
-		node.insertLeafCell(0, []byte("mykey"), []byte("myval"))
+	leafNode := &Node{
+		isLeaf:  true,
+		offsets: []uint16{},
+	}
 
-		key := node.cellKey(0)
-		assert.Equal(t, []byte("mykey"), key)
-	})
+	leafNode.appendLeafCell([]byte("key1"), []byte("value1"))
+	leafNode.appendLeafCell([]byte("key2"), []byte("value2"))
 
-	t.Run("internal cell key", func(t *testing.T) {
-		node := &Node{isLeaf: false}
-		node.appendInternalCell(5, []byte("separator"))
-		node.offsets = []uint16{0}
+	key := leafNode.cellKey(leafNode.offsets[0])
+	if !bytes.Equal(key, []byte("key1")) {
+		t.Errorf("cellKey for leaf node returned %s, expected 'key1'", key)
+	}
 
-		key := node.cellKey(0)
-		assert.Equal(t, []byte("separator"), key)
-	})
-}
+	internalNode := &Node{
+		isLeaf:  false,
+		offsets: []uint16{},
+	}
 
-func TestFindInsertionPoint(t *testing.T) {
-	t.Run("empty node", func(t *testing.T) {
-		node := &Node{isLeaf: true}
-		pos := node.findInsPointForKey([]byte("any"))
-		assert.Equal(t, uint16(0), pos)
-	})
+	internalNode.appendInternalCell(4096, []byte("key1"))
+	internalNode.appendInternalCell(8192, []byte("key2"))
 
-	t.Run("single element", func(t *testing.T) {
-		node := &Node{isLeaf: true}
-		node.insertLeafCell(0, []byte("m"), []byte("val"))
-
-		posBefore := node.findInsPointForKey([]byte("a"))
-		assert.Equal(t, uint16(0), posBefore)
-
-		posAfter := node.findInsPointForKey([]byte("z"))
-		assert.True(t, posAfter <= uint16(len(node.offsets)))
-	})
-
-	t.Run("multiple elements ordered", func(t *testing.T) {
-		node := &Node{isLeaf: true}
-		keys := [][]byte{[]byte("a"), []byte("e"), []byte("m"), []byte("r"), []byte("z")}
-
-		for i, key := range keys {
-			node.insertLeafCell(uint16(i), key, []byte("val"))
-		}
-
-		pos := node.findInsPointForKey([]byte("g"))
-		assert.True(t, pos >= 0 && pos < uint16(len(node.offsets)))
-	})
-}
-
-func TestNodeSplit(t *testing.T) {
-	t.Run("split leaf node even count", func(t *testing.T) {
-		node := &Node{isLeaf: true}
-		for i := 0; i < 4; i++ {
-			node.insertLeafCell(uint16(i), []byte{byte('a' + i)}, []byte("val"))
-		}
-
-		newNode := &Node{}
-		separator := node.split(newNode)
-
-		assert.True(t, newNode.isLeaf)
-		assert.NotNil(t, separator)
-		assert.Greater(t, len(newNode.offsets), 0)
-		assert.Greater(t, len(node.offsets), 0)
-	})
-
-	t.Run("split leaf node odd count", func(t *testing.T) {
-		node := &Node{isLeaf: true}
-		for i := 0; i < 9; i++ {
-			node.insertLeafCell(uint16(i), []byte{byte('a' + i)}, []byte("val"))
-		}
-
-		newNode := &Node{}
-		separator := node.split(newNode)
-
-		assert.NotNil(t, separator)
-		assert.Greater(t, len(newNode.leafCell), 0)
-		assert.Greater(t, len(node.leafCell), 0)
-	})
-
-	t.Run("split internal node", func(t *testing.T) {
-		node := &Node{isLeaf: false}
-		for i := 0; i < 4; i++ {
-			node.appendInternalCell(uint64(i*10), []byte{byte('a' + i)})
-		}
-
-		newNode := &Node{}
-		separator := node.split(newNode)
-
-		assert.False(t, newNode.isLeaf)
-		assert.NotNil(t, separator)
-		assert.Greater(t, len(newNode.internalCell), 0)
-		assert.Greater(t, len(node.internalCell), 0)
-	})
-
-	t.Run("separator key is first of new node", func(t *testing.T) {
-		node := &Node{isLeaf: true}
-		keys := [][]byte{[]byte("a"), []byte("b"), []byte("c"), []byte("d")}
-		for i, key := range keys {
-			node.insertLeafCell(uint16(i), key, []byte("val"))
-		}
-
-		newNode := &Node{}
-		separator := node.split(newNode)
-
-		if len(newNode.offsets) > 0 {
-			firstKey := newNode.leafCell[newNode.offsets[0]].key
-			assert.Equal(t, separator, firstKey)
-		}
-	})
-}
-
-func TestNodeEncoding(t *testing.T) {
-	t.Run("encode leaf node", func(t *testing.T) {
-		node := &Node{isLeaf: true}
-		node.insertLeafCell(0, []byte("key1"), []byte("value1"))
-		node.insertLeafCell(1, []byte("key2"), []byte("value2"))
-
-		data, err := node.encodeLeaf()
-		assert.NoError(t, err)
-		assert.NotNil(t, data)
-		assert.Greater(t, len(data), 0)
-	})
-
-	t.Run("encode internal node", func(t *testing.T) {
-		node := &Node{isLeaf: false}
-		node.appendInternalCell(10, []byte("sep1"))
-		node.appendInternalCell(20, []byte("sep2"))
-		node.offsets = []uint16{0, 1}
-
-		data, err := node.encodeInternal()
-		assert.NoError(t, err)
-		assert.NotNil(t, data)
-		assert.Greater(t, len(data), 0)
-	})
-
-	t.Run("encode empty leaf node", func(t *testing.T) {
-		node := &Node{isLeaf: true}
-
-		data, err := node.encodeLeaf()
-		assert.NoError(t, err)
-		assert.NotNil(t, data)
-	})
+	key = internalNode.cellKey(internalNode.offsets[1])
+	if !bytes.Equal(key, []byte("key2")) {
+		t.Errorf("cellKey for internal node returned %s, expected 'key2'", key)
+	}
 }
 
 func TestNodeIsFull(t *testing.T) {
-	t.Run("empty node is not full", func(t *testing.T) {
-		node := &Node{isLeaf: true}
-		assert.False(t, node.isFull())
-	})
+	leafNode := &Node{
+		isLeaf:  true,
+		offsets: []uint16{},
+	}
 
-	t.Run("node with data reports fullness", func(t *testing.T) {
-		node := &Node{isLeaf: true}
-		for i := 0; i < 9; i++ {
-			node.insertLeafCell(uint16(i), []byte("key"), []byte("value"))
-		}
-		full := node.isFull()
-		assert.True(t, full)
-	})
+	for i := 0; i < maxLeafNodeCells; i++ {
+		leafNode.appendLeafCell([]byte("key"), []byte("value"))
+	}
 
-	t.Run("node with less data doesn't reports fullness", func(t *testing.T) {
-		node := &Node{isLeaf: true}
-		for i := 0; i < 8; i++ {
-			node.insertLeafCell(uint16(i), []byte("key"), []byte("value"))
-		}
-		full := node.isFull()
-		assert.False(t, full)
-	})
+	if !leafNode.isFull() {
+		t.Error("Leaf node should be full after reaching maxLeafNodeCells")
+	}
+
+	internalNode := &Node{
+		isLeaf:  false,
+		offsets: []uint16{},
+	}
+
+	for i := 0; i <= maxInternalNodeCells; i++ {
+		internalNode.appendInternalCell(uint64(i*4096), []byte("key"))
+	}
+
+	if !internalNode.isFull() {
+		t.Error("Internal node should be full after exceeding maxInternalNodeCells")
+	}
+}
+
+func TestEmptyLeafNodeEncodeDecode(t *testing.T) {
+	node := &Node{
+		isLeaf:  true,
+		offsets: []uint16{},
+	}
+
+	encoded, err := node.encodeLeaf()
+	if err != nil {
+		t.Fatalf("Failed to encode empty leaf node: %v", err)
+	}
+
+	if len(encoded) != pageSize {
+		t.Fatalf("Encoded empty leaf node size is %d, expected %d", len(encoded), pageSize)
+	}
+
+	decodedNode := &Node{}
+	if err := decodedNode.decode(encoded); err != nil {
+		t.Fatalf("Failed to decode empty leaf node: %v", err)
+	}
+
+	if !decodedNode.isLeaf {
+		t.Errorf("Decoded node is not a leaf node")
+	}
+
+	if len(decodedNode.offsets) != 0 {
+		t.Errorf("Decoded empty node has %d offsets, expected 0", len(decodedNode.offsets))
+	}
+
+	if len(decodedNode.leafCell) != 0 {
+		t.Errorf("Decoded empty node has %d leaf cells, expected 0", len(decodedNode.leafCell))
+	}
+}
+
+func TestEmptyInternalNodeEncodeDecode(t *testing.T) {
+	node := &Node{
+		isLeaf:     false,
+		fileOffset: 4096,
+		offsets:    []uint16{},
+	}
+
+	encoded, err := node.encodeInternal()
+	if err != nil {
+		t.Fatalf("Failed to encode empty internal node: %v", err)
+	}
+
+	if len(encoded) != pageSize {
+		t.Fatalf("Encoded empty internal node size is %d, expected %d", len(encoded), pageSize)
+	}
+
+	decodedNode := &Node{}
+	if err := decodedNode.decode(encoded); err != nil {
+		t.Fatalf("Failed to decode empty internal node: %v", err)
+	}
+
+	if decodedNode.isLeaf {
+		t.Errorf("Decoded node is a leaf node, expected internal")
+	}
+
+	if len(decodedNode.offsets) != 0 {
+		t.Errorf("Decoded empty node has %d offsets, expected 0", len(decodedNode.offsets))
+	}
+
+	if len(decodedNode.internalCell) != 0 {
+		t.Errorf("Decoded empty node has %d internal cells, expected 0", len(decodedNode.internalCell))
+	}
 }

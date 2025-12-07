@@ -208,7 +208,7 @@ func TestDataPersistence(t *testing.T) {
 // TestWALRecoverySingleNode validates that a single node can recover its state
 // from the WAL after an unclean shutdown
 func TestWALRecoverySingleNode(t *testing.T) {
-	t.Skip("Skipping: WAL persistence not implemented")
+	// t.Skip("Skipping: WAL persistence not implemented")
 
 	// Create and start a single-node cluster
 	cluster := newTestCluster(t, 3)

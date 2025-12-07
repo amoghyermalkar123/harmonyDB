@@ -87,9 +87,63 @@ func OpenWithConfig(clusterConfig raft.ClusterConfig, dbOptions ...DbOptions) (*
 		db.config.LinearizedReadTimeout = 100 * time.Millisecond
 	}
 
+	db.bootstrapFromWAL()
+
 	go db.run()
 
 	return db, nil
+}
+
+// TODO: add a close method on db
+
+// bootstrapFromWAL is a recovery mechanism that initializes the database from the Write-Ahead Log (WAL).
+// no-op when there was no crash before. Call at startup
+func (db *DB) bootstrapFromWAL() {
+	lastApplied := db.kv.readMeta()
+
+	db.logger.Info("bootstrapFromWAL: starting recovery",
+		zap.Int64("lastApplied", lastApplied))
+
+	logsToApply := db.consensus.GetLogsAfter(lastApplied)
+
+	db.logger.Info("bootstrapFromWAL: fetched logs",
+		zap.Int("logsCount", len(logsToApply)))
+
+	if len(logsToApply) == 0 {
+		db.logger.Info("bootstrapFromWAL: no logs to apply")
+		// Even if no new logs to apply, restore commit index from WAL
+		// All logs in WAL are committed
+		// Only set commit index if lastApplied > 0 (meaning there are committed logs)
+		if lastApplied > 0 {
+			db.consensus.SetCommitIndex(lastApplied)
+			db.logger.Info("bootstrapFromWAL: restored commit index from lastApplied",
+				zap.Int64("commitIndex", lastApplied))
+		}
+		return
+	}
+
+	for _, log := range logsToApply {
+		db.logger.Info("bootstrapFromWAL: replaying log",
+			zap.Int64("logId", log.Id),
+			zap.String("key", log.Data.Key))
+
+		if err := db.kv.put([]byte(log.Data.Key), []byte(log.Data.Value)); err != nil {
+			panic(fmt.Sprintf("bootstrapFromWAL: put: should never panic: (%v)", err))
+		}
+
+		db.consensus.IncrementLastApplied()
+	}
+
+	db.kv.updateMeta(db.consensus.GetLastApplied())
+
+	// Set commit index to lastApplied since all WAL entries are committed
+	// Use lastApplied instead of GetLastLogID to avoid setting commit index to 1 when there are no logs
+	finalLastApplied := db.consensus.GetLastApplied()
+	db.consensus.SetCommitIndex(finalLastApplied)
+
+	db.logger.Info("bootstrapFromWAL: recovery complete",
+		zap.Int64("finalLastApplied", finalLastApplied),
+		zap.Int64("commitIndex", finalLastApplied))
 }
 
 // generateCorrelationID creates a unique correlation ID for tracing operations
@@ -101,7 +155,7 @@ func generateCorrelationID() string {
 
 func (db *DB) applyCommittedEntries(entries *raft.ToApply) error {
 	for _, log := range entries.Entries {
-		// Apply to BTree
+		// Apply to B+Tree
 		if err := db.kv.put([]byte(log.Data.Key), []byte(log.Data.Value)); err != nil {
 			panic(fmt.Sprintf("put: should never panic: (%v)", err))
 		}
@@ -122,7 +176,10 @@ func (db *DB) applyCommittedEntries(entries *raft.ToApply) error {
 		db.applyWait.Trigger(log.Id)
 	}
 
+	db.kv.updateMeta(db.consensus.GetLastApplied())
+
 	db.logger.Debug("Completed processing all consensus entries",
+
 		zap.String("operation", "applyConsensusEntries"))
 
 	return nil

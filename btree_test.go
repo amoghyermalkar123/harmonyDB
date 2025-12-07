@@ -239,7 +239,7 @@ func TestBTreeStoreOperations(t *testing.T) {
 			require.NoError(t, err)
 		}
 
-		assert.Greater(t, bt.cache.len(), 0)
+		assert.Greater(t, bt.pageCache.len(), 0)
 	})
 
 	t.Run("file offset uniqueness", func(t *testing.T) {
@@ -251,7 +251,7 @@ func TestBTreeStoreOperations(t *testing.T) {
 		}
 
 		offsets := make(map[uint64]bool)
-		for _, page := range bt.cache.all() {
+		for _, page := range bt.pageCache.all() {
 			assert.False(t, offsets[page.fileOffset], "duplicate file offset found")
 			offsets[page.fileOffset] = true
 		}
@@ -416,6 +416,142 @@ func BenchmarkBTreePut(b *testing.B) {
 		val := []byte(fmt.Sprintf("val%d", i))
 		bt.put(key, val)
 	}
+}
+
+func TestBTreeFetch(t *testing.T) {
+	setupTestLogger(t)
+
+	t.Run("fetch node from cache", func(t *testing.T) {
+		bt := NewBTreeWithPath("test_fetch_cache.db")
+		defer bt.file.Close()
+
+		node := &Node{isLeaf: true}
+		node.insertLeafCell(0, []byte("key1"), []byte("value1"))
+		bt.add(node)
+
+		fetchedNode := bt.fetch(node.fileOffset)
+		require.NotNil(t, fetchedNode)
+		assert.Equal(t, node, fetchedNode, "should return the same node from cache")
+		assert.True(t, fetchedNode.isLeaf)
+		assert.Equal(t, 1, len(fetchedNode.offsets))
+	})
+
+	t.Run("fetch node from disk", func(t *testing.T) {
+		bt := NewBTreeWithPath("test_fetch_disk.db")
+		defer bt.file.Close()
+
+		node := &Node{isLeaf: true}
+		node.fileOffset = pageSize
+		node.insertLeafCell(0, []byte("diskkey"), []byte("diskvalue"))
+
+		err := bt.update(node)
+		require.NoError(t, err)
+
+		bt.pageCache.Lock()
+		delete(bt.pageCache.nodes, int64(node.fileOffset))
+		bt.pageCache.Unlock()
+
+		fetchedNode := bt.fetch(node.fileOffset)
+		require.NotNil(t, fetchedNode)
+		assert.True(t, fetchedNode.isLeaf)
+		assert.Equal(t, 1, len(fetchedNode.offsets))
+		assert.Equal(t, []byte("diskkey"), fetchedNode.leafCell[fetchedNode.offsets[0]].key)
+		assert.Equal(t, []byte("diskvalue"), fetchedNode.leafCell[fetchedNode.offsets[0]].val)
+	})
+
+	t.Run("fetch adds node to cache", func(t *testing.T) {
+		bt := NewBTreeWithPath("test_fetch_add_cache.db")
+		defer bt.file.Close()
+
+		node := &Node{isLeaf: true}
+		node.fileOffset = pageSize * 2
+		node.insertLeafCell(0, []byte("cachekey"), []byte("cachevalue"))
+
+		err := bt.update(node)
+		require.NoError(t, err)
+
+		bt.pageCache.Lock()
+		delete(bt.pageCache.nodes, int64(node.fileOffset))
+		bt.pageCache.Unlock()
+
+		fetchedNode := bt.fetch(node.fileOffset)
+		require.NotNil(t, fetchedNode)
+
+		cachedNode := bt.pageCache.fetch(node.fileOffset)
+		require.NotNil(t, cachedNode, "fetched node should be added to cache")
+		assert.Equal(t, fetchedNode, cachedNode)
+	})
+
+	t.Run("fetch internal node from disk", func(t *testing.T) {
+		bt := NewBTreeWithPath("test_fetch_internal.db")
+		defer bt.file.Close()
+
+		internalNode := &Node{isLeaf: false}
+		internalNode.fileOffset = pageSize * 3
+		internalNode.appendInternalCell(pageSize*4, []byte("separator1"))
+		internalNode.appendInternalCell(pageSize*5, []byte("separator2"))
+
+		err := bt.update(internalNode)
+		require.NoError(t, err)
+
+		bt.pageCache.Lock()
+		delete(bt.pageCache.nodes, int64(internalNode.fileOffset))
+		bt.pageCache.Unlock()
+
+		fetchedNode := bt.fetch(internalNode.fileOffset)
+		require.NotNil(t, fetchedNode)
+		assert.False(t, fetchedNode.isLeaf)
+		assert.Equal(t, 2, len(fetchedNode.offsets))
+		assert.Equal(t, []byte("separator1"), fetchedNode.internalCell[fetchedNode.offsets[0]].key)
+		assert.Equal(t, uint64(pageSize*4), fetchedNode.internalCell[fetchedNode.offsets[0]].fileOffset)
+	})
+
+	t.Run("fetch multiple times returns same cached instance", func(t *testing.T) {
+		bt := NewBTreeWithPath("test_fetch_same_instance.db")
+		defer bt.file.Close()
+
+		node := &Node{isLeaf: true}
+		node.insertLeafCell(0, []byte("multi"), []byte("fetch"))
+		bt.add(node)
+
+		first := bt.fetch(node.fileOffset)
+		second := bt.fetch(node.fileOffset)
+		third := bt.fetch(node.fileOffset)
+
+		assert.Equal(t, first, second)
+		assert.Equal(t, second, third)
+		assert.Equal(t, first, third)
+	})
+
+	t.Run("fetch preserves node data integrity", func(t *testing.T) {
+		bt := NewBTreeWithPath("test_fetch_integrity.db")
+		defer bt.file.Close()
+
+		originalNode := &Node{isLeaf: true}
+		originalNode.fileOffset = pageSize * 6
+		originalNode.insertLeafCell(0, []byte("key1"), []byte("value1"))
+		originalNode.insertLeafCell(1, []byte("key2"), []byte("value2"))
+		originalNode.insertLeafCell(2, []byte("key3"), []byte("value3"))
+
+		err := bt.update(originalNode)
+		require.NoError(t, err)
+
+		bt.pageCache.Lock()
+		delete(bt.pageCache.nodes, int64(originalNode.fileOffset))
+		bt.pageCache.Unlock()
+
+		fetchedNode := bt.fetch(originalNode.fileOffset)
+		require.NotNil(t, fetchedNode)
+		assert.Equal(t, len(originalNode.offsets), len(fetchedNode.offsets))
+
+		for i := range originalNode.offsets {
+			origIdx := originalNode.offsets[i]
+			fetchIdx := fetchedNode.offsets[i]
+
+			assert.Equal(t, originalNode.leafCell[origIdx].key, fetchedNode.leafCell[fetchIdx].key)
+			assert.Equal(t, originalNode.leafCell[origIdx].val, fetchedNode.leafCell[fetchIdx].val)
+		}
+	})
 }
 
 func BenchmarkBTreeGet(b *testing.B) {

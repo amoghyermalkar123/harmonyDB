@@ -19,7 +19,7 @@ func TestNewFileStore(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, fs)
 	require.NotNil(t, fs.file)
-	require.NotNil(t, fs.cache)
+	require.NotNil(t, fs.pageCache)
 
 	assert.FileExists(t, storePath)
 
@@ -74,7 +74,7 @@ func TestFileStoreUpdate(t *testing.T) {
 	err = fs.update(node)
 	require.NoError(t, err)
 
-	cachedNode := fs.cache.fetch(node.fileOffset)
+	cachedNode := fs.pageCache.fetch(node.fileOffset)
 	assert.NotNil(t, cachedNode)
 	assert.Equal(t, node, cachedNode)
 
@@ -104,9 +104,9 @@ func TestFileStoreUpdateMultipleNodes(t *testing.T) {
 	err = fs.update(node2)
 	require.NoError(t, err)
 
-	assert.Equal(t, 2, fs.cache.len())
-	assert.NotNil(t, fs.cache.fetch(4096))
-	assert.NotNil(t, fs.cache.fetch(8192))
+	assert.Equal(t, 2, fs.pageCache.len())
+	assert.NotNil(t, fs.pageCache.fetch(4096))
+	assert.NotNil(t, fs.pageCache.fetch(8192))
 }
 
 func TestFileStoreUpdatePersistence(t *testing.T) {
@@ -156,13 +156,13 @@ func TestFileStoreCacheBehavior(t *testing.T) {
 	node.fileOffset = 4096
 	node.insertLeafCell(0, []byte("key"), []byte("value"))
 
-	cachedNode := fs.cache.fetch(node.fileOffset)
+	cachedNode := fs.pageCache.fetch(node.fileOffset)
 	assert.Nil(t, cachedNode)
 
 	err = fs.update(node)
 	require.NoError(t, err)
 
-	cachedNode = fs.cache.fetch(node.fileOffset)
+	cachedNode = fs.pageCache.fetch(node.fileOffset)
 	assert.NotNil(t, cachedNode)
 	assert.Equal(t, node, cachedNode)
 }
@@ -187,7 +187,7 @@ func TestFileStoreCacheUpdate(t *testing.T) {
 	err = fs.update(node)
 	require.NoError(t, err)
 
-	cachedNode := fs.cache.fetch(node.fileOffset)
+	cachedNode := fs.pageCache.fetch(node.fileOffset)
 	assert.Equal(t, 2, len(cachedNode.offsets))
 }
 
@@ -203,7 +203,7 @@ func TestFileStoreFlushPagesCleanNodes(t *testing.T) {
 	node.insertLeafCell(0, []byte("key"), []byte("value"))
 	node.markClean()
 
-	fs.cache.add(node)
+	fs.pageCache.add(node)
 
 	err = fs.flushPages()
 	require.NoError(t, err)
@@ -221,7 +221,7 @@ func TestFileStoreFlushPagesDirtyNodes(t *testing.T) {
 	node.insertLeafCell(0, []byte("key"), []byte("value"))
 	node.markDirty()
 
-	fs.cache.add(node)
+	fs.pageCache.add(node)
 
 	err = fs.flushPages()
 	require.NoError(t, err)
@@ -251,9 +251,9 @@ func TestFileStoreFlushPagesMultipleDirtyNodes(t *testing.T) {
 	node3.insertLeafCell(0, []byte("key3"), []byte("value3"))
 	node3.markClean()
 
-	fs.cache.add(node1)
-	fs.cache.add(node2)
-	fs.cache.add(node3)
+	fs.pageCache.add(node1)
+	fs.pageCache.add(node2)
+	fs.pageCache.add(node3)
 
 	err = fs.flushPages()
 	require.NoError(t, err)
@@ -329,7 +329,7 @@ func TestFileStoreConcurrentUpdates(t *testing.T) {
 
 	wg.Wait()
 
-	assert.Equal(t, numGoroutines, fs.cache.len())
+	assert.Equal(t, numGoroutines, fs.pageCache.len())
 }
 
 func TestFileStoreConcurrentFlush(t *testing.T) {
@@ -344,7 +344,7 @@ func TestFileStoreConcurrentFlush(t *testing.T) {
 		node.fileOffset = uint64(4096 * (i + 1))
 		node.insertLeafCell(0, []byte("key"), []byte("value"))
 		node.markDirty()
-		fs.cache.add(node)
+		fs.pageCache.add(node)
 	}
 
 	var wg sync.WaitGroup
@@ -361,7 +361,7 @@ func TestFileStoreConcurrentFlush(t *testing.T) {
 
 	wg.Wait()
 
-	for _, node := range fs.cache.all() {
+	for _, node := range fs.pageCache.all() {
 		assert.False(t, node.isDirty)
 	}
 }
@@ -378,7 +378,7 @@ func TestFileStoreAutoFlush(t *testing.T) {
 	node.insertLeafCell(0, []byte("key"), []byte("value"))
 	node.markDirty()
 
-	fs.cache.add(node)
+	fs.pageCache.add(node)
 
 	time.Sleep(1500 * time.Millisecond)
 
@@ -398,7 +398,7 @@ func TestFileStoreUpdateWithEmptyNode(t *testing.T) {
 	err = fs.update(node)
 	require.NoError(t, err)
 
-	cachedNode := fs.cache.fetch(node.fileOffset)
+	cachedNode := fs.pageCache.fetch(node.fileOffset)
 	assert.NotNil(t, cachedNode)
 	assert.Equal(t, 0, len(cachedNode.offsets))
 }
@@ -413,7 +413,11 @@ func TestFileStoreUpdateLargeNode(t *testing.T) {
 	node := &Node{isLeaf: true}
 	node.fileOffset = 4096
 
-	for i := 0; i < 50; i++ {
+	// Use 30 cells to fit within the 4096 byte page limit
+	// Each cell: keySize(4) + valSize(4) + key(1) + value(100) = 109 bytes
+	// 30 cells * 109 = 3270 bytes + overhead fits in 4096 bytes
+	numCells := 30
+	for i := 0; i < numCells; i++ {
 		key := []byte{byte(i)}
 		value := make([]byte, 100)
 		for j := range value {
@@ -425,8 +429,8 @@ func TestFileStoreUpdateLargeNode(t *testing.T) {
 	err = fs.update(node)
 	require.NoError(t, err)
 
-	cachedNode := fs.cache.fetch(node.fileOffset)
-	assert.Equal(t, 50, len(cachedNode.offsets))
+	cachedNode := fs.pageCache.fetch(node.fileOffset)
+	assert.Equal(t, numCells, len(cachedNode.offsets))
 }
 
 func TestFileStoreMultipleOffsets(t *testing.T) {
@@ -447,10 +451,10 @@ func TestFileStoreMultipleOffsets(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	assert.Equal(t, len(offsets), fs.cache.len())
+	assert.Equal(t, len(offsets), fs.pageCache.len())
 
 	for _, offset := range offsets {
-		node := fs.cache.fetch(offset)
+		node := fs.pageCache.fetch(offset)
 		assert.NotNil(t, node)
 	}
 }
@@ -496,7 +500,7 @@ func TestFileStoreInternalNode(t *testing.T) {
 	err = fs.update(node)
 	require.NoError(t, err)
 
-	cachedNode := fs.cache.fetch(node.fileOffset)
+	cachedNode := fs.pageCache.fetch(node.fileOffset)
 	assert.NotNil(t, cachedNode)
 	assert.False(t, cachedNode.isLeaf)
 }
@@ -532,13 +536,13 @@ func BenchmarkFileStoreFlush(b *testing.B) {
 		node.fileOffset = uint64(4096 * (i + 1))
 		node.insertLeafCell(0, []byte("key"), []byte("value"))
 		node.markDirty()
-		fs.cache.add(node)
+		fs.pageCache.add(node)
 	}
 
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		for _, node := range fs.cache.all() {
+		for _, node := range fs.pageCache.all() {
 			node.markDirty()
 		}
 		err := fs.flushPages()
