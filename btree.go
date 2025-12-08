@@ -15,16 +15,19 @@ type BTree struct {
 	// the very first time, a `root` node is always a leaf node
 	// the recursive split logic, takes care of eventually making the `root` node
 	// become an internal node
-	root   *Node
-	logger *zap.Logger
-	meta   *os.File
+	root       *Node
+	rootOffset uint64
+	logger     *zap.Logger
+	// TODO: move this into underlying file store
+	meta *os.File
 }
 
 type metaPage struct {
-	LastApplied int64
+	LastApplied     int64
+	LastCommitIndex int64
 }
 
-func (b *BTree) readMeta() int64 {
+func (b *BTree) readMeta() (int64, int64) {
 	if _, err := b.meta.Seek(0, io.SeekStart); err != nil {
 		panic(fmt.Errorf("readMeta: seek: %w", err))
 	}
@@ -32,21 +35,21 @@ func (b *BTree) readMeta() int64 {
 	var meta metaPage
 	if err := binary.Read(b.meta, binary.LittleEndian, &meta); err != nil {
 		if err == io.EOF {
-			return 0
+			return 0, 0
 		}
 
 		panic(fmt.Errorf("readMeta: read: %w", err))
 	}
 
-	return meta.LastApplied
+	return meta.LastApplied, meta.LastCommitIndex
 }
 
-func (b *BTree) updateMeta(lastApplied int64) {
+func (b *BTree) updateMeta(lastApplied int64, lastCommitIndex int64) {
 	if _, err := b.meta.Seek(0, io.SeekStart); err != nil {
 		panic(fmt.Errorf("updateMeta: seek: %w", err))
 	}
 
-	if err := binary.Write(b.meta, binary.LittleEndian, &metaPage{LastApplied: lastApplied}); err != nil {
+	if err := binary.Write(b.meta, binary.LittleEndian, &metaPage{LastApplied: lastApplied, LastCommitIndex: lastCommitIndex}); err != nil {
 		panic(fmt.Errorf("updateMeta: write: %w", err))
 	}
 
@@ -125,6 +128,7 @@ func (b *BTree) getRootPage() *Node {
 func (b *BTree) setRootPage(pg *Node) {
 	b.add(pg)
 	b.root = pg
+	b.rootOffset = pg.fileOffset
 }
 
 func (b *BTree) put(key, val []byte) error {

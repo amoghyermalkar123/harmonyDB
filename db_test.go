@@ -148,7 +148,6 @@ func TestKeyOverwrite(t *testing.T) {
 
 // TestDataPersistence validates that data survives cluster restart
 func TestDataPersistence(t *testing.T) {
-	t.Skip("Skipping: WAL not implemented")
 	// Create and start 3-node cluster
 	cluster := newTestCluster(t, 3)
 	cluster.start()
@@ -208,8 +207,6 @@ func TestDataPersistence(t *testing.T) {
 // TestWALRecoverySingleNode validates that a single node can recover its state
 // from the WAL after an unclean shutdown
 func TestWALRecoverySingleNode(t *testing.T) {
-	// t.Skip("Skipping: WAL persistence not implemented")
-
 	// Create and start a single-node cluster
 	cluster := newTestCluster(t, 3)
 	cluster.start()
@@ -591,7 +588,3 @@ func TestWALRecoveryWithCorruption(t *testing.T) {
 
 	t.Logf("Corruption handling test placeholder - implement with WAL")
 }
-
-// =============================================================================
-//  Recovery Tests
-// =============================================================================

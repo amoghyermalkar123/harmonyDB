@@ -52,6 +52,8 @@ func newTestCluster(t *testing.T, nodeCount int) *testCluster {
 
 // cleanup removes all test data and stops all nodes
 func (tc *testCluster) cleanup() {
+	fmt.Printf("[cleanup] Starting cleanup for %d nodes\n", len(tc.nodes))
+
 	// Stop all running nodes
 	for _, node := range tc.nodes {
 		if node != nil {
@@ -59,10 +61,30 @@ func (tc *testCluster) cleanup() {
 		}
 	}
 
+	// Remove database files and metadata files for each node
+	for i := 1; i <= tc.nodeCount; i++ {
+		dbFile := fmt.Sprintf("harmony-%d.db", i)
+		metaFile := fmt.Sprintf("harmony-%d.db.meta", i)
+
+		if err := os.Remove(dbFile); err != nil && !os.IsNotExist(err) {
+			tc.t.Logf("Warning: failed to remove %s: %v", dbFile, err)
+		} else {
+			fmt.Printf("[cleanup] Removed database file: %s\n", dbFile)
+		}
+
+		if err := os.Remove(metaFile); err != nil && !os.IsNotExist(err) {
+			tc.t.Logf("Warning: failed to remove %s: %v", metaFile, err)
+		} else {
+			fmt.Printf("[cleanup] Removed metadata file: %s\n", metaFile)
+		}
+	}
+
 	// Remove temporary directory
 	if tc.dataDir != "" {
 		os.RemoveAll(tc.dataDir)
 	}
+
+	fmt.Printf("[cleanup] Cleanup complete\n")
 }
 
 // allocatePorts allocates sequential ports for cluster nodes

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 	"time"
@@ -62,6 +63,7 @@ type fileStore struct {
 	rootOffset     uint64
 }
 
+// TODO: needs decode pages into memory logic
 func newFileStore(path string) (*fileStore, error) {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
@@ -71,6 +73,27 @@ func newFileStore(path string) (*fileStore, error) {
 	f := &fileStore{
 		file:      file,
 		pageCache: &cache{nodes: make(map[int64]*Node)},
+	}
+
+	ofs, err := file.Seek(0, 0)
+	if err != nil {
+		panic(fmt.Errorf("open file: seek: %w", err))
+	}
+
+	buf := make([]byte, 16)
+	if _, err := file.ReadAt(buf, ofs); err != nil {
+		if err != io.EOF {
+			panic(fmt.Errorf("read file meta: %w", err))
+		}
+	} else {
+		reader := bytes.NewReader(buf)
+
+		if err := binary.Read(reader, binary.LittleEndian, &f.rootOffset); err != nil {
+			panic(fmt.Errorf("decode rootOffset: %w", err))
+		}
+		if err := binary.Read(reader, binary.LittleEndian, &f.nextFreeOffset); err != nil {
+			panic(fmt.Errorf("decode nextFreeOffset: %w", err))
+		}
 	}
 
 	go func() {
@@ -139,8 +162,13 @@ func (f *fileStore) update(node *Node) error {
 	return nil
 }
 
+// save saves metadata about the file store
 func (f *fileStore) save() error {
 	writer := bytes.NewBuffer(make([]byte, 0, 8))
+
+	if err := binary.Write(writer, binary.LittleEndian, f.rootOffset); err != nil {
+		return err
+	}
 
 	if err := binary.Write(writer, binary.LittleEndian, f.nextFreeOffset); err != nil {
 		return err

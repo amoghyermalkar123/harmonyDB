@@ -17,8 +17,9 @@ type LogManager struct {
 	logs []*proto.Log
 	sync.RWMutex
 
-	file *os.File
-	path string
+	SyncThreshold int
+	file          *os.File
+	path          string
 }
 
 // caller acquires lock and also opens the file
@@ -137,9 +138,10 @@ func NewLM(path string) *LogManager {
 	}
 
 	lm := &LogManager{
-		logs: make([]*proto.Log, 0),
-		file: file,
-		path: path,
+		logs:          make([]*proto.Log, 0),
+		file:          file,
+		path:          path,
+		SyncThreshold: 10,
 	}
 
 	// panics if recover fails, no point in booting in invalid state
@@ -192,8 +194,10 @@ func (lm *LogManager) writeToFile(log []*proto.Log) error {
 		return err
 	}
 
-	if err := lm.file.Sync(); err != nil {
-		return fmt.Errorf("writeToFile: sync: %w", err)
+	if len(lm.logs) >= lm.SyncThreshold {
+		if err := lm.file.Sync(); err != nil {
+			return fmt.Errorf("writeToFile: sync: %w", err)
+		}
 	}
 
 	return nil
@@ -261,16 +265,16 @@ func (lm *LogManager) GetLogsAfter(index int64) []*proto.Log {
 	lm.RLock()
 	defer lm.RUnlock()
 
-	// Bounds checking to prevent panic
-	if index < 0 {
-		index = 0
-	}
-	if index >= int64(len(lm.logs)) {
+	// Convert log ID to slice index (log IDs are 1-based, slice is 0-based)
+	// index here represents "get logs starting from this log ID"
+	// so log ID 1 is at slice index 0
+	sliceIndex := max(index-1, 0)
+	if sliceIndex >= int64(len(lm.logs)) {
 		return []*proto.Log{}
 	}
 
-	result := make([]*proto.Log, len(lm.logs[index:]))
-	copy(result, lm.logs[index:])
+	result := make([]*proto.Log, len(lm.logs[sliceIndex:]))
+	copy(result, lm.logs[sliceIndex:])
 	return result
 }
 

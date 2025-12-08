@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"harmonydb/raft/proto"
 	"net"
+	"time"
 
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -40,19 +41,17 @@ func NewRaftServerWithConfig(clusterConfig ClusterConfig) *Raft {
 		config: clusterConfig,
 	}
 
+	// Start Raft server first so peers can connect to this node
+	go r.startWithPort(thisNodeConfig.RaftPort)
+
+	// Wait briefly for server to start listening
+	time.Sleep(100 * time.Millisecond)
+
 	// Initialize cluster connections
 	r.initializeCluster()
 
-	// Start Raft server
-	go r.startWithPort(thisNodeConfig.RaftPort)
+	// Start election process
 	go r.n.startElection()
-
-	r.n.logger.Info("Started Raft server with static configuration",
-		zap.String("component", "raft"),
-		zap.Int64("node_id", r.n.ID),
-		zap.Int("raft_port", thisNodeConfig.RaftPort),
-		zap.Int("http_port", thisNodeConfig.HTTPPort),
-		zap.Int("cluster_size", len(clusterConfig.Nodes)))
 
 	return r
 }
@@ -70,19 +69,17 @@ func NewRaftServerWithLogger(clusterConfig ClusterConfig, logger *zap.Logger) *R
 		config: clusterConfig,
 	}
 
+	// Start Raft server first so peers can connect to this node
+	go r.startWithPort(thisNodeConfig.RaftPort)
+
+	// Wait briefly for server to start listening
+	time.Sleep(100 * time.Millisecond)
+
 	// Initialize cluster connections
 	r.initializeCluster()
 
-	// Start Raft server
-	go r.startWithPort(thisNodeConfig.RaftPort)
+	// Start election process
 	go r.n.startElection()
-
-	logger.Info("Started Raft server with custom logger",
-		zap.String("component", "raft"),
-		zap.Int64("node_id", r.n.ID),
-		zap.Int("raft_port", thisNodeConfig.RaftPort),
-		zap.Int("http_port", thisNodeConfig.HTTPPort),
-		zap.Int("cluster_size", len(clusterConfig.Nodes)))
 
 	return r
 }

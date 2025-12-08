@@ -11,6 +11,7 @@ package raft
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/rand"
 	"strconv"
 
@@ -27,11 +28,15 @@ import (
 var ErrFailedToReplicate = errors.New("failed to replicate: majority response not received")
 var ErrNotALeader = errors.New("not a leader")
 
+const (
+	minElectionTimeout = 250 * time.Millisecond
+	maxElectionTimeout = 500 * time.Millisecond
+	heartbeatTimeout   = 50 * time.Millisecond
+)
+
 type ConsensusState struct {
 	// latest term server has seen
 	currentTerm int64
-	// who we voted for in the current term
-	votedFor int64
 	// pastVotes maps term numbers and candidate ids indicating which candidate
 	// this node voted for, for a given term
 	pastVotes map[int64]int64
@@ -70,9 +75,6 @@ type Raft struct {
 func (n *Raft) Ready() chan ToApply {
 	return n.n.applyc
 }
-
-var electionTO = time.Duration(150+rand.Intn(150)) * time.Millisecond
-var heartbeatTO = time.Duration(50) * time.Millisecond
 
 type NodeType int8
 
@@ -126,7 +128,6 @@ func newRaftNode(nodeID int64, logger *zap.Logger) *raftNode {
 			matchIndex: make(map[int]int64),
 		},
 		state: &ConsensusState{
-			votedFor:  0,
 			pastVotes: make(map[int64]int64),
 		},
 		cluster:    make(map[int64]proto.RaftClient),
@@ -143,16 +144,21 @@ func newRaftNode(nodeID int64, logger *zap.Logger) *raftNode {
 	return r
 }
 
-func (n *raftNode) CommitIdx(idx int64) {
+func (n *raftNode) CommitIndexAndScheduleForApply(idx int64) {
 	n.meta.Lock()
 	oldCommitIndex := n.meta.lastCommitIndex
 	n.meta.lastCommitIndex = idx
 	n.meta.Unlock()
 
+	// :)
+	fmt.Printf("[%s] [node:%d][term:%d][leader:%t] committed [idToCommit:%d] [lastCommitted:%d]\n",
+		time.Now().String(), n.ID, n.state.currentTerm, n.leaderID == n.ID, idx, oldCommitIndex)
+
 	// Apply newly committed entries to the state machine
 	if idx > oldCommitIndex {
+		entriesToApply := n.logManager.GetLogsAfter(oldCommitIndex)
 		n.applyc <- ToApply{
-			Entries: n.logManager.GetLogsAfter(oldCommitIndex),
+			Entries: entriesToApply,
 		}
 	}
 }
@@ -163,7 +169,9 @@ func generateNodeID() int64 {
 
 // handles incoming log replication and heartbeats
 func (n *raftNode) AppendEntriesRPC(ctx context.Context, in *proto.AppendEntries) (*proto.AppendEntriesResponse, error) {
-	n.heartbeats <- in
+	go func() {
+		n.heartbeats <- in
+	}()
 
 	n.Lock()
 	n.leaderID = in.LeaderId
@@ -173,23 +181,30 @@ func (n *raftNode) AppendEntriesRPC(ctx context.Context, in *proto.AppendEntries
 	if len(in.Entries) == 0 {
 		// committed entries from wal go to kv
 		if in.LeaderCommitIdx > n.meta.lastCommitIndex {
-			// dispatch to kv
-			n.applyc <- ToApply{
-				// It is safe and rather perfectly viable that we get logs
-				// after the `lastCommitIndex` because if we are a follower
-				// we know for sure we will have entries after last commit index
-				// because the leader only increments it's commit index when
-				// majority of nodes replicate on their end and respond back
-				// that same commit index comes to us, the follower in the subsequent
-				// heartbeat message
-				Entries: n.logManager.GetLogsAfter(n.meta.lastCommitIndex),
+			// Get entries that need to be applied
+			entriesToApply := n.logManager.GetLogsAfter(n.meta.lastCommitIndex)
+
+			// Only dispatch to kv if there are actually entries to apply
+			if len(entriesToApply) > 0 {
+				// dispatch to kv
+				n.applyc <- ToApply{
+					// It is safe and rather perfectly viable that we get logs
+					// after the `lastCommitIndex` because if we are a follower
+					// we know for sure we will have entries after last commit index
+					// because the leader only increments it's commit index when
+					// majority of nodes replicate on their end and respond back
+					// that same commit index comes to us, the follower in the subsequent
+					// heartbeat message
+					Entries: entriesToApply,
+				}
 			}
 		}
 
 		return nil, nil
 	}
 
-	n.logger.Info("Starting AppendEntries RPC", zap.String("component", "raft"), zap.Int64("sender", in.LeaderId), zap.String("key", string(in.Entries[0].Data.Key)), zap.String("value", string(in.Entries[0].Data.Value)))
+	fmt.Printf("[%s] [node:%d] aepc recv() [entries:%d]\n",
+		time.Now().String(), n.ID, len(in.Entries))
 
 	// revert to a follower state if we get a term number higher than ours
 	if n.state.currentTerm < in.Term {
@@ -197,7 +212,6 @@ func (n *raftNode) AppendEntriesRPC(ctx context.Context, in *proto.AppendEntries
 		n.meta.Lock()
 		if n.meta.nt == Leader {
 			n.meta.nt = Follower
-			n.logger.Warn("Leader transitioned back to follower", zap.String("component", "raft"), zap.Int64("node_id", n.ID), zap.Int64("new_term", in.Term))
 		}
 		n.meta.Unlock()
 	}
@@ -206,7 +220,8 @@ func (n *raftNode) AppendEntriesRPC(ctx context.Context, in *proto.AppendEntries
 	// the CurrentTerm value we send as part of the response is read by the requester
 	// and update their own CurrentTerm
 	if n.state.currentTerm > in.Term {
-		n.logger.Error("Rejecting append entries due to stale term", zap.String("component", "raft"), zap.Int64("current_term", n.state.currentTerm), zap.Int64("incoming_term", in.Term))
+		fmt.Printf("[%s] [node:%d] aepc rejected: stale term [currentTerm:%d] [in.term:%d]\n",
+			time.Now().String(), n.ID, n.state.currentTerm, in.Term)
 		return &proto.AppendEntriesResponse{
 			Success:     false,
 			CurrentTerm: n.state.currentTerm,
@@ -215,7 +230,8 @@ func (n *raftNode) AppendEntriesRPC(ctx context.Context, in *proto.AppendEntries
 
 	// there are gaps in our logs as those compared to the leader's
 	if in.PrevLogIdx > n.logManager.GetLastLogID() {
-		n.logger.Error("Incoming log ahead of local max", zap.String("component", "raft"), zap.Int64("prev_log_idx", in.PrevLogIdx), zap.Int64("local_max", n.logManager.GetLastLogID()))
+		fmt.Printf("[%s] [node:%d] aepc rejected: log gap [currentTerm:%d] [in.term:%d]\n",
+			time.Now().String(), n.ID, n.state.currentTerm, in.Term)
 		return &proto.AppendEntriesResponse{
 			Success: false,
 		}, nil
@@ -224,8 +240,8 @@ func (n *raftNode) AppendEntriesRPC(ctx context.Context, in *proto.AppendEntries
 	// make sure everything is consistent upto PrevLogIdx, PrevLogTerm
 	if in.PrevLogIdx > 0 {
 		if n.logManager.GetLog(int(in.PrevLogIdx)).GetTerm() != in.PrevLogTerm {
-			weird := n.logManager.GetLog(int(in.PrevLogIdx))
-			n.logger.Error("Inconsistent log state", zap.String("component", "raft"), zap.Int64("prev_log_idx", in.PrevLogIdx), zap.Int64("local_term", weird.GetTerm()), zap.Int64("prev_log_term", in.PrevLogTerm))
+			fmt.Printf("[%s] [node:%d] aepc rejected: log mismatch [currentTerm:%d] [in.term:%d]\n",
+				time.Now().String(), n.ID, n.state.currentTerm, in.Term)
 			return &proto.AppendEntriesResponse{
 				Success: false,
 			}, nil
@@ -245,12 +261,10 @@ func (n *raftNode) AppendEntriesRPC(ctx context.Context, in *proto.AppendEntries
 				// So we delete the entry at this index, and overwrite with the new incoming ones
 				n.logManager.TruncateAfter(int(entry.Id - 1))
 			} else {
-				n.logger.Debug("Skipping existing entry", zap.String("component", "raft"), zap.Int64("entry_id", entry.Id))
 				continue
 			}
 		}
 
-		n.logger.Info("New log entry added", zap.String("component", "raft"), zap.Int64("entry_id", entry.Id), zap.Int64("term", entry.Term))
 		n.logManager.Append(entry)
 	}
 
@@ -270,6 +284,12 @@ func (n *raftNode) AppendEntriesRPC(ctx context.Context, in *proto.AppendEntries
 		n.meta.lastCommitIndex = min(in.LeaderCommitIdx, n.logManager.GetLastLogID())
 	}
 
+	fmt.Printf("[%s] [node:%d][term:%d][leader:%t] updated commit index to %d\n",
+		time.Now().String(), n.ID, n.state.currentTerm, n.leaderID == n.ID, n.meta.lastCommitIndex)
+
+	// Apply
+	n.CommitIndexAndScheduleForApply(n.meta.lastCommitIndex)
+
 	return &proto.AppendEntriesResponse{
 		CurrentTerm: n.state.currentTerm,
 		Success:     true,
@@ -278,38 +298,50 @@ func (n *raftNode) AppendEntriesRPC(ctx context.Context, in *proto.AppendEntries
 
 // handles incoming election requests
 func (n *raftNode) RequestVoteRPC(ctx context.Context, in *proto.RequestVote) (*proto.RequestVoteResponse, error) {
-	if n.state.currentTerm > in.Term {
+	fmt.Printf("[%s] [node:%d][term:%d][leader:%t] received vote request from [node:%d][term:%d]\n",
+		time.Now().String(), n.ID, n.state.currentTerm, n.leaderID == n.ID, in.CandidateId, in.Term)
+
+	if n.state.currentTerm >= in.Term {
+		fmt.Printf("[%s] [node:%d][term:%d][leader:%t] rejected vote for [node:%d] - stale term\n",
+			time.Now().String(), n.ID, n.state.currentTerm, n.leaderID == n.ID, in.CandidateId)
 		return &proto.RequestVoteResponse{
 			VoteGranted: false,
 			Term:        n.state.currentTerm,
 		}, nil
 	}
 
-	if n.state.votedFor == 0 || n.state.votedFor == in.CandidateId {
-		if _, voted := n.state.pastVotes[in.Term]; voted {
-			// we already voted for someone this term
-			return &proto.RequestVoteResponse{
-				VoteGranted: false,
-				Term:        n.state.currentTerm,
-			}, nil
-		}
-
-		n.state.Lock()
-		n.state.pastVotes[in.Term] = in.CandidateId
-		n.state.Unlock()
-
-		if in.LastLogTerm <= n.logManager.GetLastLogTerm() {
-			n.state.Lock()
-			n.state.currentTerm = in.Term
-			n.state.Unlock()
-
-			return &proto.RequestVoteResponse{
-				VoteGranted: true,
-				Term:        n.state.currentTerm,
-			}, nil
-		}
+	// we already voted for someone this term
+	if _, voted := n.state.pastVotes[in.Term]; voted {
+		fmt.Printf("[%s] [node:%d][term:%d][leader:%t] rejected vote for [node:%d] - already voted this term\n",
+			time.Now().String(), n.ID, n.state.currentTerm, n.leaderID == n.ID, in.CandidateId)
+		return &proto.RequestVoteResponse{
+			VoteGranted: false,
+			Term:        n.state.currentTerm,
+		}, nil
 	}
 
+	n.state.Lock()
+	n.state.pastVotes[in.Term] = in.CandidateId
+	n.state.Unlock()
+
+	fmt.Printf("[%s] [node:%d][term:%d][leader:%t] logs up-to-date check [in.LastLogTerm:%d] [in.n.logManager.GetLastLogTerm():%d]\n",
+		time.Now().String(), n.ID, n.state.currentTerm, n.leaderID == n.ID, in.LastLogTerm, n.logManager.GetLastLogTerm())
+
+	if in.LastLogTerm <= n.logManager.GetLastLogTerm() {
+		n.state.Lock()
+		n.state.currentTerm = in.Term
+		n.state.Unlock()
+
+		fmt.Printf("[%s] [node:%d][term:%d][leader:%t] granted vote to [node:%d]\n",
+			time.Now().String(), n.ID, n.state.currentTerm, n.leaderID == n.ID, in.CandidateId)
+		return &proto.RequestVoteResponse{
+			VoteGranted: true,
+			Term:        n.state.currentTerm,
+		}, nil
+	}
+
+	fmt.Printf("[%s] [node:%d][term:%d][leader:%t] rejected vote for [node:%d] - log not up-to-date\n",
+		time.Now().String(), n.ID, n.state.currentTerm, n.leaderID == n.ID, in.CandidateId)
 	return &proto.RequestVoteResponse{
 		VoteGranted: false,
 		Term:        n.state.currentTerm,
@@ -322,6 +354,9 @@ func (n *raftNode) replicate(ctx context.Context, key, val []byte, requestID uin
 	n.state.Lock()
 	currentTerm := n.state.currentTerm
 	n.state.Unlock()
+
+	fmt.Printf("[%s] [node:%d][term:%d][leader:%t] replicate start\n",
+		time.Now().String(), n.ID, n.state.currentTerm, n.leaderID == n.ID)
 
 	logID := n.logManager.NextLogID()
 
@@ -338,46 +373,45 @@ func (n *raftNode) replicate(ctx context.Context, key, val []byte, requestID uin
 
 	n.logManager.Append(newlog)
 
+	fmt.Printf("[%s] [node:%d][term:%d][leader:%t] [nextLog:%d]\n",
+		time.Now().String(), n.ID, n.state.currentTerm, n.leaderID == n.ID, logID)
+
 	peers := []int64{}
+
 	for k := range n.cluster {
 		peers = append(peers, k)
 	}
 
-	replicationRounds := 0
-	for true {
-		var err error
-		replicationRounds++
-
-		peers, err = n.sendAppendEntries(peers)
-		if peers == nil && err == nil {
-			break
-		}
+	peers, err := n.sendAppendEntries(ctx, peers)
+	if err != nil {
+		panic(fmt.Errorf("unreachable state %w", err))
 	}
 
+	fmt.Printf("[%s] [node:%d][term:%d][leader:%t] replication complete [nextLog:%d]\n",
+		time.Now().String(), n.ID, n.state.currentTerm, n.leaderID == n.ID, logID)
+
 	replStatus := 1
-	peerStatuses := make(map[int64]bool)
 
 	for peer := range n.cluster {
 		idx := n.matchIndex[peer]
 		if idx == newlog.Id {
 			replStatus += 1
-			peerStatuses[peer] = true
-		} else {
-			peerStatuses[peer] = false
 		}
 	}
 
 	requiredReplicas := len(n.cluster)/2 + 1
 
 	if replStatus >= requiredReplicas {
-		// log has been successfully applied to the state machine,
-		// now commit this log.
-		n.CommitIdx(newlog.Id)
+		fmt.Printf("[%s] [node:%d][term:%d][leader:%t] quorum achieved [nextLog:%d]\n",
+			time.Now().String(), n.ID, n.state.currentTerm, n.leaderID == n.ID, logID)
 
-		n.logger.Info("Log entry successfully replicated", zap.String("component", "raft"), zap.Int64("log_id", newlog.Id), zap.Int64("commit_index", newlog.Id))
+		n.CommitIndexAndScheduleForApply(newlog.Id)
 
 		return nil
 	}
+
+	fmt.Printf("[%s] [node:%d][term:%d][leader:%t] quorum failed [nextLog:%d]\n",
+		time.Now().String(), n.ID, n.state.currentTerm, n.leaderID == n.ID, logID)
 
 	return ErrFailedToReplicate
 }
@@ -385,11 +419,20 @@ func (n *raftNode) replicate(ctx context.Context, key, val []byte, requestID uin
 // given a list of `peers` send appendEntries rpc to them and return the peers
 // who responded with false rpc response. The caller must them to retry
 // returns nil array and error when the replication was successfull
-func (n *raftNode) sendAppendEntries(peers []int64) ([]int64, error) {
+func (n *raftNode) sendAppendEntries(ctx context.Context, peers []int64) ([]int64, error) {
 	failedPeers := []int64{}
 
 	for _, peer := range peers {
+		fmt.Println("sending AE rpc")
 		if peer == n.ID {
+			continue
+		}
+
+		// Check if peer connection exists
+		if n.cluster[peer] == nil {
+			n.logger.Warn("peer connection not available",
+				zap.Int64("peer_id", peer))
+			failedPeers = append(failedPeers, peer)
 			continue
 		}
 
@@ -401,9 +444,7 @@ func (n *raftNode) sendAppendEntries(peers []int64) ([]int64, error) {
 			prevLogTerm = lastLog.Term
 		}
 
-		n.logger.Debug("Sending AppendEntries RPC", zap.String("component", "raft"), zap.Int64("prev_log_index", prevLogIndex), zap.Int64("prev_log_term", prevLogTerm))
-
-		resp, err := n.cluster[peer].AppendEntriesRPC(context.TODO(), &proto.AppendEntries{
+		resp, err := n.cluster[peer].AppendEntriesRPC(ctx, &proto.AppendEntries{
 			Term:            n.state.currentTerm,
 			LeaderId:        n.ID,
 			PrevLogIdx:      prevLogIndex,
@@ -413,37 +454,47 @@ func (n *raftNode) sendAppendEntries(peers []int64) ([]int64, error) {
 		})
 
 		if err != nil {
+			n.logger.Warn("AppendEntries RPC failed",
+				zap.Int64("peer_id", peer),
+				zap.Error(err))
 			failedPeers = append(failedPeers, peer)
-			n.logger.Debug("Peer failed to respond", zap.String("component", "raft"), zap.Int64("peer_id", peer))
-		} else {
-			// this response means the node is telling us that the log
-			// consistency check has failed, so we decrement our nextIndex
-			// here
-			if !resp.Success && resp.CurrentTerm == 0 {
-				n.nextIndex[peer] -= 1
-				n.logger.Debug("Log match failed, decremented next index", zap.String("component", "raft"), zap.Int64("peer_id", peer))
-				failedPeers = append(failedPeers, peer)
-			}
-
-			if resp.CurrentTerm > n.state.currentTerm {
-				// transition back to the follower state as we have encountered a term higher
-				// than ours indicating a potential leader
-				n.state.currentTerm = resp.CurrentTerm
-				n.meta.Lock()
-				if n.meta.nt == Leader {
-					n.meta.nt = Follower
-					n.logger.Warn("Leader transitioned back to follower during replication", zap.String("component", "raft"), zap.Int64("node_id", n.ID))
-				}
-				n.meta.Unlock()
-			}
-
-			if resp.Success {
-				n.matchIndex[peer] += 1
-				n.nextIndex[peer] += 2
-				n.logger.Info("Successful RPC, advancing match and next indexes", zap.String("component", "raft"))
-			}
-
+			continue
 		}
+
+		fmt.Printf("AE RPC response from peer %d: Success=%v, CurrentTerm=%d\n", peer, resp.Success, resp.CurrentTerm)
+
+		// this response means the node is telling us that the log
+		// consistency check has failed, so we decrement our nextIndex
+		// here
+		if !resp.Success && resp.CurrentTerm == 0 {
+			n.nextIndex[peer] -= 1
+			failedPeers = append(failedPeers, peer)
+			fmt.Printf("Peer %d failed log consistency check\n", peer)
+		}
+
+		if resp.CurrentTerm > n.state.currentTerm {
+			// transition back to the follower state as we have encountered a term higher
+			// than ours indicating a potential leader
+			n.state.currentTerm = resp.CurrentTerm
+			n.meta.Lock()
+			if n.meta.nt == Leader {
+				n.meta.nt = Follower
+			}
+			n.meta.Unlock()
+		}
+
+		if resp.Success {
+			// Get the logs that were sent in this AppendEntries RPC
+			sentLogs := n.logManager.GetLogsAfter(n.nextIndex[peer])
+			if len(sentLogs) > 0 {
+				// Update matchIndex to the ID of the last log that was successfully replicated
+				lastReplicatedLogID := sentLogs[len(sentLogs)-1].Id
+				n.matchIndex[peer] = lastReplicatedLogID
+				n.nextIndex[peer] = lastReplicatedLogID + 1
+				fmt.Printf("Peer %d successfully replicated log %d\n", peer, lastReplicatedLogID)
+			}
+		}
+
 	}
 
 	if len(failedPeers) > 0 {
@@ -453,32 +504,28 @@ func (n *raftNode) sendAppendEntries(peers []int64) ([]int64, error) {
 	return nil, nil
 }
 
+func randomTimeout(minVal time.Duration) <-chan time.Time {
+	if minVal == 0 {
+		return nil
+	}
+	extra := time.Duration(rand.Int63()) % minVal
+	return time.After(minVal + extra)
+}
+
 func (n *raftNode) startElection() {
-	// Use random election timeout for each node to prevent split votes
-	// Use node ID as part of the seed to ensure different nodes get different timeouts
-	r := rand.New(rand.NewSource(time.Now().UnixNano() + n.ID))
-	electionTimeout := time.Duration(250+r.Intn(1000)) * time.Millisecond
-	electionTimeOut := time.NewTicker(electionTimeout)
-	n.logger.Info("Starting election routine", zap.String("component", "raft"), zap.Int64("node_id", n.ID), zap.Duration("timeout", electionTimeout))
+	electionTimeOut := randomTimeout(500 * time.Millisecond)
 
 	for {
 		select {
-		case <-electionTimeOut.C:
-			if n.meta.nt == Leader || len(n.cluster) < 2 {
-				newTimeout := time.Duration(150+r.Intn(150)) * time.Millisecond
-				electionTimeOut.Reset(newTimeout)
+		case <-electionTimeOut:
+			// fmt.Printf("[%s] [node:%d][leader:%t] election trigger\n", time.Now().String(), n.ID, n.leaderID == n.ID)
+
+			if n.meta.nt == Leader {
+				electionTimeOut = randomTimeout(600 * time.Millisecond)
 				continue
 			}
 
-			// Reset with new random timeout after this election attempt
-			newTimeout := time.Duration(250+r.Intn(1000)) * time.Millisecond
-			electionTimeOut.Reset(newTimeout)
-
-			n.logger.Debug("Election timeout triggered - starting new election",
-				zap.String("component", "raft"),
-				zap.String("operation", "election"),
-				zap.Int64("node_id", n.ID),
-				zap.Int64("current_term", n.state.currentTerm))
+			electionTimeOut = randomTimeout(800 * time.Millisecond)
 
 			// increment currentTerm
 			n.state.Lock()
@@ -487,25 +534,12 @@ func (n *raftNode) startElection() {
 			newTerm := n.state.currentTerm
 			n.state.Unlock()
 
-			n.logger.Debug("Incremented term and voting for self",
-				zap.String("component", "raft"),
-				zap.String("operation", "election"),
-				zap.Int64("node_id", n.ID),
-				zap.Int64("new_term", newTerm))
-
 			// start election
+			// grant vote to self
 			votes := 1
-			rejections := 0
-			errors := 0
 
-			for nodeID, node := range n.cluster {
-				n.logger.Debug("Requesting vote from peer",
-					zap.String("component", "raft"),
-					zap.String("operation", "election"),
-					zap.Int64("node_id", n.ID),
-					zap.Int64("peer_id", nodeID),
-					zap.Int64("term", newTerm))
-
+			// request votes for election
+			for nid, node := range n.cluster {
 				voteResponse, err := node.RequestVoteRPC(context.TODO(), &proto.RequestVote{
 					Term:         newTerm,
 					CandidateId:  n.ID,
@@ -513,52 +547,23 @@ func (n *raftNode) startElection() {
 					LastLogTerm:  n.logManager.GetLastLogTerm(),
 				})
 
-				// TODO: exponential backoff
+				// TODO: exponential backoff and transition cluster to read-only
 				if err != nil {
-					errors++
-					n.logger.Debug("Vote request failed",
-						zap.String("component", "raft"),
-						zap.String("operation", "election"),
-						zap.Int64("node_id", n.ID),
-						zap.Int64("peer_id", nodeID),
-						zap.Error(err))
+					fmt.Printf("[%s] [node:%d][leader:%t] request to [node:%d] failed\n", time.Now().String(), n.ID, n.leaderID == n.ID, nid)
 					continue
 				}
 
 				if voteResponse.VoteGranted {
+					fmt.Printf("[%s] [node:%d][leader:%t] received vote from [node:%d]\n", time.Now().String(), n.ID, n.leaderID == n.ID, nid)
 					votes++
-					n.logger.Debug("Vote granted by peer",
-						zap.String("component", "raft"),
-						zap.String("operation", "election"),
-						zap.Int64("node_id", n.ID),
-						zap.Int64("peer_id", nodeID),
-						zap.Int64("term", newTerm))
-				} else {
-					rejections++
-					n.logger.Debug("Vote rejected by peer",
-						zap.String("component", "raft"),
-						zap.String("operation", "election"),
-						zap.Int64("node_id", n.ID),
-						zap.Int64("peer_id", nodeID),
-						zap.Int64("term", newTerm),
-						zap.Int64("peer_term", voteResponse.Term))
 				}
 			}
-
-			majority := len(n.cluster)/2 + 1
-			n.logger.Debug("Election voting completed",
-				zap.String("component", "raft"),
-				zap.String("operation", "election"),
-				zap.Int64("node_id", n.ID),
-				zap.Int64("term", newTerm),
-				zap.Int("votes_received", votes),
-				zap.Int("votes_needed", majority),
-				zap.Int("rejections", rejections),
-				zap.Int("errors", errors))
 
 			// elect leader if votes granted by more than half of the nodes
 			// present in the cluster
 			if votes > len(n.cluster)/2 {
+				fmt.Printf("[%s] [node:%d][leader:%t] became leader\n", time.Now().String(), n.ID, n.leaderID == n.ID)
+
 				n.meta.Lock()
 				n.meta.nt = Leader
 				n.meta.Unlock()
@@ -567,42 +572,19 @@ func (n *raftNode) startElection() {
 				n.leaderID = n.ID
 				n.Unlock()
 
-				n.logger.Info("Successfully elected as leader",
-					zap.String("component", "raft"),
-					zap.String("operation", "election"),
-					zap.Int64("node_id", n.ID),
-					zap.Int64("term", newTerm),
-					zap.Int("votes_received", votes),
-					zap.Int("cluster_size", len(n.cluster)+1))
-
 				n.heartbeatCloser = make(chan struct{})
 				go n.sendHeartbeats()
-			} else {
-				n.logger.Debug("Election failed - insufficient votes",
-					zap.String("component", "raft"),
-					zap.String("operation", "election"),
-					zap.Int64("node_id", n.ID),
-					zap.Int64("term", newTerm),
-					zap.Int("votes_received", votes),
-					zap.Int("votes_needed", majority))
 			}
 
 		case entry := <-n.heartbeats:
-			// TODO: apply comitted entries
 			if n.meta.nt == Leader && entry.Term > n.state.currentTerm {
-				n.logger.Debug("Stepping down as leader due to higher term heartbeat",
-					zap.String("component", "raft"),
-					zap.String("operation", "election"),
-					zap.Int64("node_id", n.ID),
-					zap.Int64("current_term", n.state.currentTerm),
-					zap.Int64("heartbeat_term", entry.Term))
-
 				// stop sending heartbeats
 				close(n.heartbeatCloser)
 
+				fmt.Printf("[%s] [node:%d][leader:%t] became follower\n", time.Now().String(), n.ID, n.leaderID == n.ID)
 				n.meta.Lock()
+
 				n.meta.nt = Follower
-				n.logger.Warn("Node transitioned back to follower after failed election", zap.String("component", "raft"), zap.Int64("node_id", n.ID))
 				n.meta.Unlock()
 			}
 
@@ -610,22 +592,15 @@ func (n *raftNode) startElection() {
 			// the leader is sending us the heartbeats
 			// resetting the election timeout to represent
 			// up-to-date ness
-			newTimeout := time.Duration(150+r.Intn(150)) * time.Millisecond
-			electionTimeOut.Reset(newTimeout)
-			// n.logger.Debug("Node received leader heartbeat", zap.String("component", "raft"), zap.Int64("node_id", n.ID), zap.Int64("leader_term", entry.Term))
+			electionTimeOut = randomTimeout(150 * time.Millisecond)
 		}
 	}
 }
 
 func (n *raftNode) sendHeartbeats() {
-	n.logger.Debug("Starting heartbeat routine",
-		zap.String("component", "raft"),
-		zap.String("operation", "heartbeat"),
-		zap.Int64("node_id", n.ID),
-		zap.Duration("interval", heartbeatTO),
-		zap.Int("cluster_size", len(n.cluster)))
+	heartbeats := time.NewTicker(heartbeatTimeout)
 
-	heartbeats := time.NewTicker(heartbeatTO)
+	n.heartbeatRPC()
 
 	for {
 		select {
@@ -635,40 +610,32 @@ func (n *raftNode) sendHeartbeats() {
 			}
 
 		case <-heartbeats.C:
-			n.state.Lock()
-			currentTerm := n.state.currentTerm
-			n.state.Unlock()
-
-			n.meta.RLock()
-			commitIndex := n.meta.lastCommitIndex
-			n.meta.RUnlock()
-
-			lastLogID := n.logManager.GetLastLogID()
-			lastLogTerm := n.logManager.GetLastLogTerm()
-
-			successfulHeartbeats := 0
-			failedHeartbeats := 0
-
-			for _, node := range n.cluster {
-				// Since this is a heartbeat message, we only need
-				// to send term and leader id to maintain the leader status
-				_, err := node.AppendEntriesRPC(context.TODO(), &proto.AppendEntries{
-					Term:            currentTerm,
-					LeaderId:        n.ID,
-					PrevLogIdx:      lastLogID,
-					PrevLogTerm:     lastLogTerm,
-					LeaderCommitIdx: commitIndex,
-					// We don't need to send `Entries` array here.
-				})
-
-				if err != nil {
-					failedHeartbeats++
-					continue
-				}
-
-				successfulHeartbeats++
-			}
+			n.heartbeatRPC()
 		}
+	}
+}
+
+func (n *raftNode) heartbeatRPC() {
+	// fmt.Printf("[%s] [node:%d][leader:%t] hb\n", time.Now().String(), n.ID, n.leaderID == n.ID)
+	n.state.Lock()
+	currentTerm := n.state.currentTerm
+	n.state.Unlock()
+
+	n.meta.RLock()
+	commitIndex := n.meta.lastCommitIndex
+	n.meta.RUnlock()
+
+	lastLogID := n.logManager.GetLastLogID()
+	lastLogTerm := n.logManager.GetLastLogTerm()
+
+	for _, node := range n.cluster {
+		node.AppendEntriesRPC(context.TODO(), &proto.AppendEntries{
+			Term:            currentTerm,
+			LeaderId:        n.ID,
+			PrevLogIdx:      lastLogID,
+			PrevLogTerm:     lastLogTerm,
+			LeaderCommitIdx: commitIndex,
+		})
 	}
 }
 
