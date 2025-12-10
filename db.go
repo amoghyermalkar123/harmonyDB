@@ -89,7 +89,7 @@ func OpenWithConfig(clusterConfig raft.ClusterConfig, dbOptions ...DbOptions) (*
 
 	db.bootstrapFromWAL()
 
-	go db.run()
+	go db.applyLoop()
 
 	return db, nil
 }
@@ -99,24 +99,32 @@ func OpenWithConfig(clusterConfig raft.ClusterConfig, dbOptions ...DbOptions) (*
 // bootstrapFromWAL is a recovery mechanism that initializes the database from the Write-Ahead Log (WAL).
 // no-op when there was no crash before. Call at startup
 func (db *DB) bootstrapFromWAL() {
-	lastApplied, lastCommitted := db.kv.readMeta()
-	logsToApply := db.consensus.GetLogsAfter(lastApplied)
+	lastCommitted, lastApplied := db.kv.readMeta()
+	logsToApply := db.consensus.GetLogsAfter(lastApplied + 1)
+	// recover the old last committed and last applied
 	db.consensus.SetCommitIndex(lastCommitted)
+	db.consensus.SetLastApplied(lastApplied)
 
+	fmt.Printf("[%s] [node:%d] bootstrap started [lastCommitted:%d] [lastApplied:%d]\n",
+		time.Now().String(), db.consensus.GetConfig().ThisNodeID, lastCommitted, lastApplied)
+
+	// apply the gap between committed and last applied
 	for _, log := range logsToApply {
-		db.logger.Info("bootstrapFromWAL: replaying log",
-			zap.Int64("logId", log.Id),
-			zap.String("key", log.Data.Key))
+		fmt.Printf("[%s] [node:%d] bootstrap proc [entry:%d]\n",
+			time.Now().String(), db.consensus.GetConfig().ThisNodeID, log.Id)
 
 		if err := db.kv.put([]byte(log.Data.Key), []byte(log.Data.Value)); err != nil {
 			panic(fmt.Sprintf("bootstrapFromWAL: put: should never panic: (%v)", err))
 		}
 
-		db.consensus.IncrementLastApplied()
+		db.consensus.SetLastApplied(log.Id)
 	}
 
+	fmt.Printf("[%s] [node:%d] bootstrap ended [lastApplied:%d] [lastCommit:%d]\n",
+		time.Now().String(), db.consensus.GetConfig().ThisNodeID, db.consensus.GetLastApplied(), db.consensus.GetCommitIndex())
+
+	// update metadata
 	db.kv.updateMeta(db.consensus.GetLastApplied(), db.consensus.GetCommitIndex())
-	db.consensus.SetCommitIndex(db.consensus.GetCommitIndex())
 }
 
 // generateCorrelationID creates a unique correlation ID for tracing operations
@@ -140,10 +148,10 @@ func (db *DB) applyCommittedEntries(entries *raft.ToApply) error {
 		//
 		// increment last applied to indicate durability of the comitted entries
 		// in primary storage
-		db.consensus.IncrementLastApplied()
+		db.consensus.SetLastApplied(log.Id)
 
-		fmt.Printf("[%s] [node:%d] incr last applied [lastApplied:%d]\n",
-			time.Now().String(), db.consensus.GetConfig().ThisNodeID, db.consensus.GetLastApplied())
+		fmt.Printf("[%s] [node:%d] incr last applied [lastApplied:%d] [lastCommitted:%d]\n",
+			time.Now().String(), db.consensus.GetConfig().ThisNodeID, db.consensus.GetLastApplied(), db.consensus.GetCommitIndex())
 
 		// Extract request ID and trigger the specific waiter
 		//
@@ -159,17 +167,20 @@ func (db *DB) applyCommittedEntries(entries *raft.ToApply) error {
 		db.applyWait.Trigger(log.Id)
 	}
 
+	fmt.Printf("[node:%d] CRIT Updated Metadata la:%d, lc%d", db.consensus.GetConfig().ThisNodeID, db.consensus.GetLastApplied(), db.consensus.GetCommitIndex())
+
 	db.kv.updateMeta(db.consensus.GetLastApplied(), db.consensus.GetCommitIndex())
 
 	return nil
 }
 
-func (db *DB) run() {
+func (db *DB) applyLoop() {
 	for {
 		select {
 		case d := <-db.consensus.Ready():
-			fmt.Printf("[%s] [node:%d] ready() received \n",
-				time.Now().String(), db.consensus.GetConfig().ThisNodeID)
+			fmt.Printf("[%s] [node:%d] ready() received [logs:%d-%d]\n",
+				time.Now().String(), db.consensus.GetConfig().ThisNodeID, d.Entries[0].Id,
+				d.Entries[len(d.Entries)-1].Id)
 
 			newjob := newJob("consensus", func(ctx context.Context) {
 				db.applyCommittedEntries(&d)

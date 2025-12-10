@@ -230,6 +230,7 @@ func (n *Node) markClean() {
 
 func (n *Node) encodeLeaf() ([]byte, error) {
 	buf := &bytes.Buffer{}
+	// write node type
 	if err := binary.Write(buf, binary.LittleEndian, LeafNode); err != nil {
 		return nil, err
 	}
@@ -239,12 +240,14 @@ func (n *Node) encodeLeaf() ([]byte, error) {
 		return nil, err
 	}
 
+	// write actual offsets in sequence
 	for _, ofs := range n.offsets {
 		if err := binary.Write(buf, binary.LittleEndian, ofs); err != nil {
 			return nil, err
 		}
 	}
 
+	// write key-value pairs in offset sequence
 	for _, ofs := range n.offsets {
 		if err := binary.Write(buf, binary.LittleEndian, n.leafCell[ofs].keySize); err != nil {
 			return nil, err

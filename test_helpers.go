@@ -79,6 +79,25 @@ func (tc *testCluster) cleanup() {
 		}
 	}
 
+	// Remove WAL files for each node
+	walDir := "/tmp/members"
+	for i := 1; i <= tc.nodeCount; i++ {
+		walFile := fmt.Sprintf("%s/%d", walDir, i)
+		walMetaFile := fmt.Sprintf("%s/%d.meta", walDir, i)
+
+		if err := os.Remove(walFile); err != nil && !os.IsNotExist(err) {
+			tc.t.Logf("Warning: failed to remove WAL file %s: %v", walFile, err)
+		} else if err == nil {
+			fmt.Printf("[cleanup] Removed WAL file: %s\n", walFile)
+		}
+
+		if err := os.Remove(walMetaFile); err != nil && !os.IsNotExist(err) {
+			tc.t.Logf("Warning: failed to remove WAL meta file %s: %v", walMetaFile, err)
+		} else if err == nil {
+			fmt.Printf("[cleanup] Removed WAL meta file: %s\n", walMetaFile)
+		}
+	}
+
 	// Remove temporary directory
 	if tc.dataDir != "" {
 		os.RemoveAll(tc.dataDir)

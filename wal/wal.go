@@ -285,3 +285,12 @@ func (lm *LogManager) TruncateAfter(index int) {
 		lm.logs = lm.logs[:index+1]
 	}
 }
+
+func (lm *LogManager) Close() error {
+	lm.Lock()
+	defer lm.Unlock()
+	if lm.file != nil {
+		return lm.file.Close()
+	}
+	return nil
+}

@@ -22,26 +22,30 @@ type BTree struct {
 	meta *os.File
 }
 
-type metaPage struct {
-	LastApplied     int64
-	LastCommitIndex int64
-}
-
 func (b *BTree) readMeta() (int64, int64) {
 	if _, err := b.meta.Seek(0, io.SeekStart); err != nil {
 		panic(fmt.Errorf("readMeta: seek: %w", err))
 	}
 
-	var meta metaPage
-	if err := binary.Read(b.meta, binary.LittleEndian, &meta); err != nil {
+	var lastCmt, lastApp int64
+
+	if err := binary.Read(b.meta, binary.LittleEndian, &lastCmt); err != nil {
 		if err == io.EOF {
-			return 0, 0
+			return lastCmt, lastApp
 		}
 
-		panic(fmt.Errorf("readMeta: read: %w", err))
+		panic(fmt.Errorf("readMeta: read last commit: %w", err))
 	}
 
-	return meta.LastApplied, meta.LastCommitIndex
+	if err := binary.Read(b.meta, binary.LittleEndian, &lastApp); err != nil {
+		if err == io.EOF {
+			return lastCmt, lastApp
+		}
+
+		panic(fmt.Errorf("readMeta: read last applied: %w", err))
+	}
+
+	return lastCmt, lastApp
 }
 
 func (b *BTree) updateMeta(lastApplied int64, lastCommitIndex int64) {
@@ -49,8 +53,12 @@ func (b *BTree) updateMeta(lastApplied int64, lastCommitIndex int64) {
 		panic(fmt.Errorf("updateMeta: seek: %w", err))
 	}
 
-	if err := binary.Write(b.meta, binary.LittleEndian, &metaPage{LastApplied: lastApplied, LastCommitIndex: lastCommitIndex}); err != nil {
-		panic(fmt.Errorf("updateMeta: write: %w", err))
+	if err := binary.Write(b.meta, binary.LittleEndian, lastCommitIndex); err != nil {
+		panic(fmt.Errorf("updateMeta: write last commit: %w", err))
+	}
+
+	if err := binary.Write(b.meta, binary.LittleEndian, lastApplied); err != nil {
+		panic(fmt.Errorf("updateMeta: write last applied: %w", err))
 	}
 
 	if err := b.meta.Sync(); err != nil {

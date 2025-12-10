@@ -151,12 +151,13 @@ func (n *raftNode) CommitIndexAndScheduleForApply(idx int64) {
 	n.meta.Unlock()
 
 	// :)
-	fmt.Printf("[%s] [node:%d][term:%d][leader:%t] committed [idToCommit:%d] [lastCommitted:%d]\n",
-		time.Now().String(), n.ID, n.state.currentTerm, n.leaderID == n.ID, idx, oldCommitIndex)
+	fmt.Printf("[%s] [node:%d][term:%d][leader:%t] CommitIndexAndScheduleForApply committed [idToCommit:%d] [lastCommitted:%d]\n",
+		time.Now().String(), n.ID, n.state.currentTerm, n.leaderID == n.ID, n.meta.lastCommitIndex, oldCommitIndex)
 
 	// Apply newly committed entries to the state machine
 	if idx > oldCommitIndex {
 		entriesToApply := n.logManager.GetLogsAfter(oldCommitIndex)
+		fmt.Printf("DBG Sending to ApplyC from Commit")
 		n.applyc <- ToApply{
 			Entries: entriesToApply,
 		}
@@ -179,13 +180,23 @@ func (n *raftNode) AppendEntriesRPC(ctx context.Context, in *proto.AppendEntries
 
 	// just a heartbeat
 	if len(in.Entries) == 0 {
-		// committed entries from wal go to kv
-		if in.LeaderCommitIdx > n.meta.lastCommitIndex {
+		// committed entries from leader wal go to follower kv
+		//
+		// Raft Paper: Section 5.3
+		//
+		// The leader keeps track of the highest index it knows
+		// to be committed, and it includes that index in future
+		// AppendEntries RPCs (including heartbeats) so that the
+		// other servers eventually find out. Once a follower learns
+		// that a log entry is committed, it applies the entry to its
+		// local state machine (in log order).
+		if in.LeaderCommitIdx > n.meta.lastCommitIndex && n.meta.lastCommitIndex > n.meta.lastAppliedToSM {
 			// Get entries that need to be applied
 			entriesToApply := n.logManager.GetLogsAfter(n.meta.lastCommitIndex)
 
 			// Only dispatch to kv if there are actually entries to apply
 			if len(entriesToApply) > 0 {
+				fmt.Printf("DBG Sending to ApplyC from AERPC [leaderCommitIdx:%d] [lastComitIdx:%d]\n", in.LeaderCommitIdx, n.meta.lastCommitIndex)
 				// dispatch to kv
 				n.applyc <- ToApply{
 					// It is safe and rather perfectly viable that we get logs
@@ -280,9 +291,14 @@ func (n *raftNode) AppendEntriesRPC(ctx context.Context, in *proto.AppendEntries
 	// be on the same page even though we have new logs given to us, this condition
 	// tells us that leader for some reason has only committed until a certain Id and
 	// that Id is behind what we have in our local logs
-	if in.LeaderCommitIdx > n.meta.lastCommitIndex {
-		n.meta.lastCommitIndex = min(in.LeaderCommitIdx, n.logManager.GetLastLogID())
-	}
+	//
+	// TODO: revisit logic
+	// if in.LeaderCommitIdx > n.meta.lastCommitIndex {
+	// 	fmt.Printf("[%s] [node:%d][term:%d][leader:%t] updated commit index to %d\n",
+	// 		time.Now().String(), n.ID, n.state.currentTerm, n.leaderID == n.ID, n.meta.lastCommitIndex)
+
+	// 	n.meta.lastCommitIndex = min(in.LeaderCommitIdx, n.logManager.GetLastLogID())
+	// }
 
 	fmt.Printf("[%s] [node:%d][term:%d][leader:%t] updated commit index to %d\n",
 		time.Now().String(), n.ID, n.state.currentTerm, n.leaderID == n.ID, n.meta.lastCommitIndex)
@@ -304,6 +320,7 @@ func (n *raftNode) RequestVoteRPC(ctx context.Context, in *proto.RequestVote) (*
 	if n.state.currentTerm >= in.Term {
 		fmt.Printf("[%s] [node:%d][term:%d][leader:%t] rejected vote for [node:%d] - stale term\n",
 			time.Now().String(), n.ID, n.state.currentTerm, n.leaderID == n.ID, in.CandidateId)
+
 		return &proto.RequestVoteResponse{
 			VoteGranted: false,
 			Term:        n.state.currentTerm,
@@ -334,6 +351,7 @@ func (n *raftNode) RequestVoteRPC(ctx context.Context, in *proto.RequestVote) (*
 
 		fmt.Printf("[%s] [node:%d][term:%d][leader:%t] granted vote to [node:%d]\n",
 			time.Now().String(), n.ID, n.state.currentTerm, n.leaderID == n.ID, in.CandidateId)
+
 		return &proto.RequestVoteResponse{
 			VoteGranted: true,
 			Term:        n.state.currentTerm,
@@ -342,6 +360,7 @@ func (n *raftNode) RequestVoteRPC(ctx context.Context, in *proto.RequestVote) (*
 
 	fmt.Printf("[%s] [node:%d][term:%d][leader:%t] rejected vote for [node:%d] - log not up-to-date\n",
 		time.Now().String(), n.ID, n.state.currentTerm, n.leaderID == n.ID, in.CandidateId)
+
 	return &proto.RequestVoteResponse{
 		VoteGranted: false,
 		Term:        n.state.currentTerm,
@@ -359,6 +378,9 @@ func (n *raftNode) replicate(ctx context.Context, key, val []byte, requestID uin
 		time.Now().String(), n.ID, n.state.currentTerm, n.leaderID == n.ID)
 
 	logID := n.logManager.NextLogID()
+
+	fmt.Printf("CRIT [%s] [node:%d][term:%d][leader:%t] nextLogId:%d\n",
+		time.Now().String(), n.ID, n.state.currentTerm, n.leaderID == n.ID, logID)
 
 	newlog := &proto.Log{
 		Term: currentTerm,
@@ -562,8 +584,6 @@ func (n *raftNode) startElection() {
 			// elect leader if votes granted by more than half of the nodes
 			// present in the cluster
 			if votes > len(n.cluster)/2 {
-				fmt.Printf("[%s] [node:%d][leader:%t] became leader\n", time.Now().String(), n.ID, n.leaderID == n.ID)
-
 				n.meta.Lock()
 				n.meta.nt = Leader
 				n.meta.Unlock()
@@ -571,6 +591,8 @@ func (n *raftNode) startElection() {
 				n.Lock()
 				n.leaderID = n.ID
 				n.Unlock()
+
+				fmt.Printf("[%s] [node:%d][leader:%t] became leader\n", time.Now().String(), n.ID, n.leaderID == n.ID)
 
 				n.heartbeatCloser = make(chan struct{})
 				go n.sendHeartbeats()
@@ -647,8 +669,8 @@ func (r *Raft) GetLastApplied() int64 {
 	return r.n.meta.lastAppliedToSM
 }
 
-func (r *Raft) IncrementLastApplied() {
+func (r *Raft) SetLastApplied(lastApplied int64) {
 	r.n.meta.Lock()
-	r.n.meta.lastAppliedToSM++
+	r.n.meta.lastAppliedToSM = lastApplied
 	r.n.meta.Unlock()
 }

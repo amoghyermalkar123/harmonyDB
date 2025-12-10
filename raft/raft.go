@@ -202,6 +202,13 @@ func (r *Raft) Stop() {
 		r.n.logger.Info("Stopping Raft server", zap.String("component", "raft"))
 		r.server.Stop() // Immediate stop, not graceful
 	}
+
+	// Close WAL file
+	if r.n.logManager != nil {
+		if err := r.n.logManager.Close(); err != nil {
+			r.n.logger.Error("Failed to close WAL file", zap.Error(err))
+		}
+	}
 }
 
 // GetTerm returns the current term
