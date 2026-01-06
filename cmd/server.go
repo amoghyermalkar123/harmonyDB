@@ -2,44 +2,21 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 
-	"harmonydb"
 	"harmonydb/api"
-	"harmonydb/raft"
-
-	"go.uber.org/zap"
 )
 
 func main() {
 	httpPort := getPortFromEnv()
 	raftPort := getRaftPortFromEnv()
 
-	// Initialize global logger
-	if err := harmonydb.InitLogger(httpPort, false); err != nil {
-		fmt.Printf("Failed to initialize logger: %v\n", err)
-		os.Exit(1)
-	}
-
-	defer harmonydb.Logger.Sync()
-
-	logger := harmonydb.CreateOperationLogger("server", "startup",
-		zap.Int("http_port", httpPort),
-		zap.Int("raft_port", raftPort),
-		zap.String("pid", fmt.Sprintf("%d", os.Getpid())))
-
-	// Set logger for raft package
-	raft.SetLogger(harmonydb.GetLogger())
-	logger.Debug("Logger initialized and raft logger configured")
-
 	server := api.NewHTTPServerWithRaftPort(httpPort, raftPort)
-	logger.Debug("HTTP server instance created")
-
-	logger.Info("Starting HarmonyDB server")
 
 	if err := server.Start(); err != nil {
-		harmonydb.LogErrorWithContext(logger, "Server startup failed", err)
+		slog.Error("server startup failed", "error", err, "http_port", httpPort, "raft_port", raftPort)
 		os.Exit(1)
 	}
 }

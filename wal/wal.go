@@ -5,14 +5,51 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"harmonydb/raft/proto"
+	proto "harmonydb/repl/proto/repl"
 	"io"
 	"os"
 	"path/filepath"
 	"sync"
 )
 
-// TODO: make this a proper WAL implementation
+// Storage is the interface for persistent log storage
+// This abstracts away the WAL implementation details from the pure FSM
+// Implementations can be in-memory (for testing) or file-based (for production)
+// The existing wal.LogManager from the wal/ package implements this interface
+type Storage interface {
+	// Append adds a log entry to storage
+	Append(log *proto.Log)
+
+	// GetLog retrieves a log entry at the given index (1-based)
+	// Returns nil if the log does not exist
+	GetLog(index int64) *proto.Log
+
+	// GetLogsAfter returns all logs after the given index (inclusive)
+	// For example, GetLogsAfter(5) returns logs with IDs >= 5
+	GetLogsAfter(index int64) []*proto.Log
+
+	// GetLogs returns all logs in storage
+	GetLogs() []*proto.Log
+
+	// TruncateAfter removes all logs after the given index (exclusive)
+	// For example, TruncateAfter(5) keeps logs 1-5 and removes 6+
+	TruncateAfter(index int64)
+
+	// GetLastLogID returns the ID of the last log entry
+	// Returns 0 if no logs exist
+	GetLastLogID() int64
+
+	// GetLastLogTerm returns the term of the last log entry
+	// Returns 0 if no logs exist
+	GetLastLogTerm() int64
+
+	// NextLogID returns the next available log ID
+	NextLogID() int64
+
+	// Close closes the storage and releases resources
+	Close() error
+}
+
 type LogManager struct {
 	logs []*proto.Log
 	sync.RWMutex
@@ -234,17 +271,17 @@ func (lm *LogManager) GetLastLogTerm() int64 {
 	return lm.logs[len(lm.logs)-1].Term
 }
 
-func (lm *LogManager) GetLog(index int) *proto.Log {
+func (lm *LogManager) GetLog(index int64) *proto.Log {
 	lm.RLock()
 	defer lm.RUnlock()
 
 	// we do this because Id: 1 is stored at slice index 0
-	index = index - 1
-	if index < 0 || index >= len(lm.logs) {
+	sliceIndex := int(index - 1)
+	if sliceIndex < 0 || sliceIndex >= len(lm.logs) {
 		return nil
 	}
 
-	return lm.logs[index]
+	return lm.logs[sliceIndex]
 }
 
 func (lm *LogManager) GetLength() int {
@@ -278,11 +315,12 @@ func (lm *LogManager) GetLogsAfter(index int64) []*proto.Log {
 	return result
 }
 
-func (lm *LogManager) TruncateAfter(index int) {
+func (lm *LogManager) TruncateAfter(index int64) {
 	lm.Lock()
 	defer lm.Unlock()
-	if index >= 0 && index < len(lm.logs) {
-		lm.logs = lm.logs[:index+1]
+	sliceIndex := int(index)
+	if sliceIndex >= 0 && sliceIndex < len(lm.logs) {
+		lm.logs = lm.logs[:sliceIndex+1]
 	}
 }
 

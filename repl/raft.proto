@@ -1,0 +1,81 @@
+syntax = "proto3";
+package raft;
+
+option go_package = "proto/repl";
+
+enum EntryType {
+  ENTRY_NORMAL = 0;
+  ENTRY_CONF_CHANGE = 1;
+}
+
+message Entry {
+  optional uint64 Term = 2;
+  optional uint64 Index = 3;
+  optional EntryType Type = 1;
+  optional bytes Data = 4;
+}
+
+enum MessageType {
+  MSG_UNKNOWN = 0;
+  MSG_APP = 1;
+  MSG_APP_RESP = 2;
+  MSG_VOTE = 3;
+  MSG_VOTE_RESP = 4;
+  MSG_SNAP = 5;
+  MSG_HEARTBEAT = 6;
+  MSG_HEARTBEAT_RESP = 7;
+}
+
+message Message {
+  MessageType type = 1;
+  int64 to = 2;
+  int64 from = 3;
+  RequestVote vote = 4;
+  RequestVoteResponse voteResp = 5;
+  AppendEntries entries = 6;
+  AppendEntriesResponse entriesResp = 7;
+}
+
+message RequestVote {
+  optional uint64 term = 1;
+  int64 candidate_id = 2;
+  int64 last_log_index = 3;
+  int64 last_log_term = 4;
+}
+
+message RequestVoteResponse {
+  int64 term = 1;
+  bool vote_granted = 2;
+}
+
+message AppendEntries {
+  int64 term = 1;
+  int64 leader_id = 2;
+  int64 prev_log_idx = 3;
+  int64 prev_log_term = 4;
+  // empty for heartbeat messages from leader to followers
+  repeated Log entries = 5;
+  int64 leader_commit_idx = 6;
+}
+
+message Log {
+  int64 term = 1;
+  int64 id = 2;
+  Cmd data = 3;
+}
+
+message Cmd {
+  string op = 1;
+  string key = 2;
+  string value = 3;
+  uint64 request_id = 4;
+}
+
+message AppendEntriesResponse {
+  int64 current_term = 1;
+  bool success = 2;
+}
+
+service RaftService {
+  rpc Process(Message) returns (Message) {}
+}

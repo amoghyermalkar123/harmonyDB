@@ -88,10 +88,42 @@ func NewBTreeWithPath(dbPath string) *BTree {
 		meta:      metaDataPage,
 	}
 
-	// root page always starts out as leaf
-	b.setRootPage(&Node{isLeaf: true})
+	// Load root page from disk if it exists, otherwise create fresh
+	if f.rootOffset > 0 {
+		rootNode, err := b.loadPage(f.rootOffset)
+		if err != nil {
+			panic(fmt.Errorf("load root page: %w", err))
+		}
+		b.root = rootNode
+		b.rootOffset = f.rootOffset
+	} else {
+		// Fresh database - create new root as leaf
+		b.setRootPage(&Node{isLeaf: true})
+	}
 
 	return b
+}
+
+// loadPage reads a page from disk at the given offset and decodes it
+func (b *BTree) loadPage(offset uint64) (*Node, error) {
+	// Read page data from disk
+	buf := make([]byte, pageSize)
+	if _, err := b.file.ReadAt(buf, int64(offset)); err != nil {
+		return nil, fmt.Errorf("read page at offset %d: %w", offset, err)
+	}
+
+	// Decode the page
+	node := &Node{fileOffset: offset}
+	if err := node.decode(buf); err != nil {
+		return nil, fmt.Errorf("decode page: %w", err)
+	}
+
+	// Add to cache
+	b.pageCache.Lock()
+	b.pageCache.nodes[int64(offset)] = node
+	b.pageCache.Unlock()
+
+	return node, nil
 }
 
 // in-memory store

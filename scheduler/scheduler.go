@@ -1,4 +1,4 @@
-package harmonydb
+package scheduler
 
 import (
 	"context"
@@ -7,8 +7,8 @@ import (
 
 // establishes total order of operations performed on the database
 // by establishing a FIFO scheduler that runs tasks in the order they were added.
-type fifoScheduler struct {
-	queue  []job
+type FifoScheduler struct {
+	queue  []Job
 	ctx    context.Context
 	cancel context.CancelFunc
 	cond   *sync.Cond
@@ -17,21 +17,21 @@ type fifoScheduler struct {
 
 // an applier that usually applies consensus committed entries
 // to the database
-type job struct {
+type Job struct {
 	name string
 	do   func(context.Context)
 }
 
-func newJob(name string, do func(context.Context)) job {
-	return job{
+func NewJob(name string, do func(context.Context)) Job {
+	return Job{
 		name: name,
 		do:   do,
 	}
 }
 
-func NewFifoScheduler() *fifoScheduler {
-	f := &fifoScheduler{
-		queue: make([]job, 0),
+func NewFifoScheduler() *FifoScheduler {
+	f := &FifoScheduler{
+		queue: make([]Job, 0),
 	}
 	f.cond = sync.NewCond(&f.mu)
 	f.ctx, f.cancel = context.WithCancel(context.Background())
@@ -40,7 +40,7 @@ func NewFifoScheduler() *fifoScheduler {
 	return f
 }
 
-func (s *fifoScheduler) AddTask(task job) {
+func (s *FifoScheduler) AddTask(task Job) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -50,9 +50,9 @@ func (s *fifoScheduler) AddTask(task job) {
 }
 
 // nextTask MUST be called with lock held
-func (s *fifoScheduler) nextTask() job {
+func (s *FifoScheduler) nextTask() Job {
 	if len(s.queue) == 0 {
-		return job{}
+		return Job{}
 	}
 
 	task := s.queue[0]
@@ -61,7 +61,7 @@ func (s *fifoScheduler) nextTask() job {
 }
 
 // FIFO scheduler runs tasks in the order they were added.
-func (f *fifoScheduler) run() {
+func (f *FifoScheduler) run() {
 	for {
 		f.mu.Lock()
 
@@ -81,7 +81,7 @@ func (f *fifoScheduler) run() {
 }
 
 // Stop stops the scheduler and cancels all pending jobs.
-func (f *fifoScheduler) stop() {
+func (f *FifoScheduler) stop() {
 	f.mu.Lock()
 	f.cancel()
 	f.cancel = nil

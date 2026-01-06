@@ -5,7 +5,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"harmonydb/raft"
+	"harmonydb/repl"
+	proto "harmonydb/repl/proto/repl"
+	"harmonydb/scheduler"
 	"net/http"
 	"time"
 
@@ -25,15 +27,16 @@ type Response struct {
 }
 
 type DB struct {
-	kv         *BTree
-	consensus  *raft.Raft
-	httpClient *http.Client
-	logger     *zap.Logger
-	scheduler  *fifoScheduler
-	waiter     Wait
-	applyWait  WaitTime
-	generator  *Generator
-	config     Config
+	kv              *BTree
+	raft            repl.RaftNode
+	httpClient      *http.Client
+	logger          *zap.Logger
+	scheduler       *scheduler.FifoScheduler
+	waiter          Wait
+	applyWait       WaitTime
+	generator       *Generator
+	config          Config
+	lastCommitIndex int64
 }
 
 type Config struct {
@@ -44,38 +47,29 @@ type Config struct {
 type DbOptions func(*Config)
 
 func Open(raftPort int, httpPort int, opts ...DbOptions) (*DB, error) {
-	nodeID := int64(1)
-	clusterConfig := raft.ClusterConfig{
-		ThisNodeID: nodeID,
-		Nodes: map[int64]raft.NodeConfig{
-			nodeID: {
-				ID:       nodeID,
-				RaftPort: raftPort,
-				HTTPPort: httpPort,
-				Address:  "localhost",
-			},
-		},
+	// Determine config path based on raft port
+	configPath := fmt.Sprintf("./repl/cluster-node%d.yaml", (raftPort-5001)+1)
+
+	rn, err := repl.NewRaftNode(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("opendb with config: %w", err)
 	}
 
-	return OpenWithConfig(clusterConfig, opts...)
-}
-
-func OpenWithConfig(clusterConfig raft.ClusterConfig, dbOptions ...DbOptions) (*DB, error) {
-	// Use node ID to create unique database file for each node
-	dbPath := fmt.Sprintf("harmony-%d.db", clusterConfig.ThisNodeID)
+	// Default db path based on node ID
+	dbPath := fmt.Sprintf("./data/node_%d.db", rn.ID)
 
 	db := &DB{
 		kv:         NewBTreeWithPath(dbPath),
-		consensus:  raft.NewRaftServerWithConfig(clusterConfig),
+		raft:       rn,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 		logger:     GetStructuredLogger("db"),
-		scheduler:  NewFifoScheduler(),
+		scheduler:  scheduler.NewFifoScheduler(),
 		waiter:     newWaiter(),
 		applyWait:  newWaitTime(),
-		generator:  NewGenerator(uint16(clusterConfig.ThisNodeID), time.Now()),
+		generator:  NewGenerator(uint16(rn.ID), time.Now()),
 	}
 
-	for _, opt := range dbOptions {
+	for _, opt := range opts {
 		opt(&db.config)
 	}
 
@@ -87,44 +81,27 @@ func OpenWithConfig(clusterConfig raft.ClusterConfig, dbOptions ...DbOptions) (*
 		db.config.LinearizedReadTimeout = 100 * time.Millisecond
 	}
 
-	db.bootstrapFromWAL()
+	// Replay WAL entries to recover B+tree state
+	// This needs to happen BEFORE starting applyLoop
+	walStorage := rn.GetWAL()
+	if walStorage != nil {
+		if err := ReplayWAL(db.kv, walStorage); err != nil {
+			return nil, fmt.Errorf("replay WAL: %w", err)
+		}
+	}
 
 	go db.applyLoop()
 
-	return db, nil
-}
-
-// TODO: add a close method on db
-
-// bootstrapFromWAL is a recovery mechanism that initializes the database from the Write-Ahead Log (WAL).
-// no-op when there was no crash before. Call at startup
-func (db *DB) bootstrapFromWAL() {
-	lastCommitted, lastApplied := db.kv.readMeta()
-	logsToApply := db.consensus.GetLogsAfter(lastApplied + 1)
-	// recover the old last committed and last applied
-	db.consensus.SetCommitIndex(lastCommitted)
-	db.consensus.SetLastApplied(lastApplied)
-
-	fmt.Printf("[%s] [node:%d] bootstrap started [lastCommitted:%d] [lastApplied:%d]\n",
-		time.Now().String(), db.consensus.GetConfig().ThisNodeID, lastCommitted, lastApplied)
-
-	// apply the gap between committed and last applied
-	for _, log := range logsToApply {
-		fmt.Printf("[%s] [node:%d] bootstrap proc [entry:%d]\n",
-			time.Now().String(), db.consensus.GetConfig().ThisNodeID, log.Id)
-
-		if err := db.kv.put([]byte(log.Data.Key), []byte(log.Data.Value)); err != nil {
-			panic(fmt.Sprintf("bootstrapFromWAL: put: should never panic: (%v)", err))
+	// start the ticker (100ms tick interval)
+	go func() {
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for range ticker.C {
+			db.raft.Tick()
 		}
+	}()
 
-		db.consensus.SetLastApplied(log.Id)
-	}
-
-	fmt.Printf("[%s] [node:%d] bootstrap ended [lastApplied:%d] [lastCommit:%d]\n",
-		time.Now().String(), db.consensus.GetConfig().ThisNodeID, db.consensus.GetLastApplied(), db.consensus.GetCommitIndex())
-
-	// update metadata
-	db.kv.updateMeta(db.consensus.GetLastApplied(), db.consensus.GetCommitIndex())
+	return db, nil
 }
 
 // generateCorrelationID creates a unique correlation ID for tracing operations
@@ -134,59 +111,33 @@ func generateCorrelationID() string {
 	return hex.EncodeToString(bytes)
 }
 
-func (db *DB) applyCommittedEntries(entries *raft.ToApply) error {
-	for _, log := range entries.Entries {
-		fmt.Printf("[%s] [node:%d] apply kv() [entry:%d]\n",
-			time.Now().String(), db.consensus.GetConfig().ThisNodeID, log.Id)
-
-		// Apply to B+Tree
-		if err := db.kv.put([]byte(log.Data.Key), []byte(log.Data.Value)); err != nil {
-			panic(fmt.Sprintf("put: should never panic: (%v)", err))
-		}
-
-		// State Machine Application
-		//
-		// increment last applied to indicate durability of the comitted entries
-		// in primary storage
-		db.consensus.SetLastApplied(log.Id)
-
-		fmt.Printf("[%s] [node:%d] incr last applied [lastApplied:%d] [lastCommitted:%d]\n",
-			time.Now().String(), db.consensus.GetConfig().ThisNodeID, db.consensus.GetLastApplied(), db.consensus.GetCommitIndex())
-
-		// Extract request ID and trigger the specific waiter
-		//
-		requestID := log.Data.RequestId
-		if requestID != 0 {
-			db.waiter.Trigger(requestID, nil)
-		}
-
-		fmt.Printf("[%s] [node:%d] trigger applyWait [for log:%d]\n",
-			time.Now().String(), db.consensus.GetConfig().ThisNodeID, log.Id)
-
-		// Also trigger applied index wait for linearizable reads
-		db.applyWait.Trigger(log.Id)
-	}
-
-	fmt.Printf("[node:%d] CRIT Updated Metadata la:%d, lc%d", db.consensus.GetConfig().ThisNodeID, db.consensus.GetLastApplied(), db.consensus.GetCommitIndex())
-
-	db.kv.updateMeta(db.consensus.GetLastApplied(), db.consensus.GetCommitIndex())
-
-	return nil
-}
-
 func (db *DB) applyLoop() {
 	for {
 		select {
-		case d := <-db.consensus.Ready():
-			fmt.Printf("[%s] [node:%d] ready() received [logs:%d-%d]\n",
-				time.Now().String(), db.consensus.GetConfig().ThisNodeID, d.Entries[0].Id,
-				d.Entries[len(d.Entries)-1].Id)
+		case ta := <-db.raft.Apply():
+			db.scheduler.AddTask(scheduler.NewJob("applier", func(ctx context.Context) {
+				var lastAppliedIdx int64
 
-			newjob := newJob("consensus", func(ctx context.Context) {
-				db.applyCommittedEntries(&d)
-			})
+				for _, e := range ta.Entries {
+					if err := db.kv.put([]byte(e.GetData().GetKey()), []byte(e.GetData().GetValue())); err != nil {
+						panic(fmt.Sprintf("applier %s", err.Error()))
+					}
 
-			db.scheduler.AddTask(newjob)
+					// (linearizability) trigger write waiters
+					db.waiter.Trigger(e.GetData().RequestId, nil)
+
+					lastAppliedIdx = e.GetId()
+				}
+
+				// Update metadata with lastApplied and commitIndex for recovery
+				if len(ta.Entries) > 0 {
+					db.kv.updateMeta(lastAppliedIdx, ta.CommitIndex)
+				}
+
+				// (linearizability) update and trigger read waiters
+				db.lastCommitIndex = ta.CommitIndex
+				db.applyWait.Trigger(ta.CommitIndex)
+			}))
 		}
 	}
 }
@@ -200,8 +151,25 @@ func (db *DB) Put(ctx context.Context, key, val []byte) error {
 	id := db.generator.Next()
 	blockingChan := db.waiter.Register(id)
 
+	// create the proposal message
+	msg := &proto.Message{
+		Type: proto.MessageType_MSG_APP,
+		Entries: &proto.AppendEntries{
+			Entries: []*proto.Log{
+				{
+					Data: &proto.Cmd{
+						Op:        "PUT",
+						Key:       string(key),
+						Value:     string(val),
+						RequestId: id,
+					},
+				},
+			},
+		},
+	}
+
 	// propose the entry for consensus with request ID
-	if err := db.consensus.Put(mainCtx, key, val, id); err != nil {
+	if _, err := db.raft.Process(mainCtx, msg); err != nil {
 		return fmt.Errorf("consensus: %w", err)
 	}
 
@@ -225,11 +193,12 @@ func (db *DB) Put(ctx context.Context, key, val []byte) error {
 
 func (db *DB) Get(ctx context.Context, key []byte) ([]byte, error) {
 	// timeout for the read
-	mainCtx, cancel := context.WithTimeout(ctx, db.config.ProposalTimeout)
+	mainCtx, cancel := context.WithTimeout(ctx, db.config.LinearizedReadTimeout)
 	defer cancel()
 
-	commitIdx := db.consensus.GetCommitIndex()
-
+	// (linearizability) wait for all committed entries to be applied
+	// this ensures we read the most recent state
+	commitIdx := db.lastCommitIndex
 	blockingRead := db.applyWait.Wait(commitIdx)
 
 	select {
@@ -243,21 +212,5 @@ func (db *DB) Get(ctx context.Context, key []byte) ([]byte, error) {
 		return value, nil
 	case <-mainCtx.Done():
 		return nil, fmt.Errorf("get timeout: %w", mainCtx.Err())
-	}
-
-}
-
-func (db *DB) GetLeaderID() int64 {
-	return db.consensus.GetLeaderID()
-}
-
-func (db *DB) GetRaft() *raft.Raft {
-	return db.consensus
-}
-
-// Stop gracefully shuts down the database and raft server
-func (db *DB) Stop() {
-	if db.consensus != nil {
-		db.consensus.Stop()
 	}
 }

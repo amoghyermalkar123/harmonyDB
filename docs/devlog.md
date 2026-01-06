@@ -99,3 +99,8 @@ for which entries do you decide you want to load the b+tree for? only left to be
 just realized i cannot implement mmap for my database. i would need a buffer pool manager as the database is not embedded. plus i will need to integrate this in recovery mechanisms and would also need an LRU for the same.
 
 [3/11] slpt: when developing a database in it's early stages, don't work on the decode path. only work on the encode path. this will make sure that as the db evolves incrementally, you can focus on building it bottom to top and are free to make changes with enough flexibility because the file format is flexible. since the decode path is not there it will just create additional data in a file and after restarts or between tests the previously persisted data will not be accessible in the next run, but atleast you are free to change the file format.
+
+[14/12] completed first draft with some fundamental tests passing for linearizability. It's now getting hard to figure out how the db is working just by reading due to un-organized first write. Now the rewrite focuses on
+readability and individual component testing, which was cumbersome with the first version.
+Hoping to close this ASAP since i'm getting bored to a halt often to continue this project. Once the rewrite is done
+i will be publishing heavy documentation work, release a learning aid tool (either in zig/go, unclear ATM) and then post on X and substack and close this out.
