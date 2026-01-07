@@ -4,7 +4,7 @@ A toy distributed key-value database built in Go with Raft consensus.
 
 ## Features
 
-- Key-value storage with B-tree indexing
+- Key-value storage with B+ tree for page management
 - Distributed consensus using Raft protocol
 - HTTP API for database operations
 - FIFO scheduling for request handling
