@@ -33,6 +33,12 @@ go build
 
 ## Test
 
+### Unit tests
 ```bash
-go test
+make test
+```
+
+### Integration tests
+```bash
+make test-integration
 ```
