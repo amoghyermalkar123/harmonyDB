@@ -2,25 +2,13 @@
 
 ## Learning-Driven Development Plan
 
-### Phase 0: QoL
-- [x] Add logging for debugging (✅ Implemented with zap)
-- [ ] **Performance Monitoring & Instrumentation**
-  - Add Prometheus client library to dependencies
-  - Create metrics package with key performance indicators
-  - Add /metrics endpoint to HTTP server
-  - Instrument Raft operations with metrics (elections, log replication, state transitions)
-  - Instrument database operations with metrics (Put/Get latency, throughput)
-  - Instrument API operations with metrics (request duration, status codes)
-  - Create Docker Compose for Prometheus + Grafana
-  - Create Grafana dashboards (cluster health, performance, system resources)
-  - Add pprof endpoints for profiling (CPU, memory, goroutines)
-  - Implement load testing framework (k6 scripts, custom Go clients)
-  - Add distributed tracing with OpenTelemetry/Jaeger
-
 ### Phase 1: Core Distributed Features (High Impact)
-- [ ] **WAL Implementation** - Learn durability guarantees
+- [X] **WAL Implementation** - Learn durability guarantees
   - Write-ahead logging for crash recovery
   - Log replay mechanisms (recovery)
+- [X] **Linearizability**
+  - Linearizable reads
+  - Linearizable writes
 - [ ] **Log Compaction** - Essential for any real Raft deployment
   - Snapshot creation and restoration
   - Log truncation logic
@@ -30,7 +18,7 @@
   - Split-brain prevention validation
   - Quorum-based operation testing
 
-### Phase 3: Performance & Scale
+### Phase 2: Performance & Scale
 - [ ] **Buffer Pool Management** - Critical for database performance
   - LRU/Clock replacement policies
   - Page pinning and unpinning
@@ -40,7 +28,7 @@
   - Lock coupling strategies
   - Read-write lock optimization
   
-### Phase 2: Transaction Support
+### Phase 3: Transaction Support
 - [ ] **Basic Transactions with ACID Properties**
   - Begin/Commit/Rollback semantics
   - Atomicity guarantees
@@ -77,22 +65,3 @@
 - [ ] **Storage Optimizations**
   - Page-level compression
   - Bloom filters for negative lookups
-
-## Immediate Issues (Fix These First)
-
-### Critical Bugs
-- [ ] Fix B+ tree root reassignment bug in `btree.go:119`
-- [ ] Fix child page fetching in `btree.go:141`
-- [ ] Implement missing decode functions in `node.go:269-271`
-- [ ] Fix format string errors in `cmd/dbclient.go:57,69`
-
-### Missing Features
-- [ ] Add Raft tests (currently no raft package tests)
-- [ ] Implement proper leader forwarding for non-leader nodes
-- [ ] Complete second goroutine in dbclient
-- [ ] Add integration tests for B+ tree and Raft together
-
-### Code Quality
-- [ ] Add godoc comments for public APIs
-- [ ] More granular error types
-- [ ] Better error handling throughout codebase
